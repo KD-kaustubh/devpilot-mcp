@@ -12,7 +12,7 @@ class ServerTests(WorkspaceTestCase, unittest.IsolatedAsyncioTestCase):
     async def test_tools_are_discoverable_and_read_only(self) -> None:
         async with Client(create_server(self.workspace)) as client:
             tools = {tool.name: tool for tool in (await client.list_tools()).tools}
-        self.assertEqual(set(tools), {"list_directory", "read_file", "search_files", "search_code"})
+        self.assertEqual(set(tools), {"list_directory", "read_file", "search_files", "search_code", "analyze_repository"})
         for tool in tools.values():
             self.assertTrue(tool.annotations.read_only_hint)
 
@@ -73,6 +73,47 @@ class ServerTests(WorkspaceTestCase, unittest.IsolatedAsyncioTestCase):
                     result = await client.call_tool("search_code", args)
                     self.assertTrue(result.is_error)
                     self.assertIn(expected, result.content[0].text)
+
+    async def test_analyze_repository_is_registered_without_parameters(self) -> None:
+        async with Client(create_server(self.workspace)) as client:
+            tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+        tool = tools["analyze_repository"]
+        self.assertEqual(tool.input_schema.get("properties", {}), {})
+        self.assertIn("heuristics", tool.output_schema["properties"])
+
+    async def test_analyze_repository_round_trip(self) -> None:
+        async with Client(create_server(self.workspace)) as client:
+            result = await client.call_tool("analyze_repository", {})
+
+        self.assertFalse(result.is_error)
+        data = result.structured_content
+        self.assertEqual(data["total_files"], 4)  # node_modules/dep.js is ignored
+        self.assertEqual(data["languages"], {"Python": 2, "Markdown": 1})
+        self.assertEqual(data["documentation_files"], ["README.md"])
+        self.assertEqual(data["directories"], [{"path": "src", "file_count": 2}])
+        self.assertEqual(
+            data["heuristics"]["possible_entry_points"],
+            [{"file": "src/app.py", "kind": "filename", "detail": "conventional entry-point filename 'app.py'"}],
+        )
+
+    async def test_analyze_repository_ignores_path_arguments(self) -> None:
+        # The tool takes no path, so a smuggled one must not widen its reach.
+        (self.secret.parent / "package.json").write_text('{"main": "outside.js"}', encoding="utf-8")
+        async with Client(create_server(self.workspace)) as client:
+            result = await client.call_tool("analyze_repository", {"path": "../"})
+        # The SDK drops unknown arguments, so this analyzes the workspace as usual.
+        self.assertFalse(result.is_error)
+        self.assertEqual(result.structured_content["dependency_manifests"], [])
+        self.assertEqual(result.structured_content["total_files"], 4)
+
+    async def test_analyze_repository_missing_root_is_a_tool_error(self) -> None:
+        server = create_server(self.workspace)
+        self.tearDown()  # delete the workspace after the server was created
+        async with Client(server) as client:
+            result = await client.call_tool("analyze_repository", {})
+        self.assertTrue(result.is_error)
+        self.assertIn("workspace root no longer exists", result.content[0].text)
+        self.setUp()  # recreate so the normal tearDown succeeds
 
 
 if __name__ == "__main__":

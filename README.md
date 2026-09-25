@@ -5,7 +5,8 @@ DevPilot MCP is a [Model Context Protocol](https://modelcontextprotocol.io) serv
 It is being built in phases:
 
 - **Phase 1: read-only filesystem access.** List, read and search files.
-- **Phase 2 (this release): code search.** `search_code` searches source files only and can be limited to a subdirectory or file.
+- **Phase 2: code search.** `search_code` searches source files only and can be limited to a subdirectory or file.
+- **Phase 3 (this release): repository understanding.** `analyze_repository` returns a deterministic, factual overview of the repository.
 
 The server never touches anything outside one configured workspace directory.
 
@@ -17,6 +18,7 @@ The server never touches anything outside one configured workspace directory.
 | `read_file` | `path` | `content`, `size_bytes`, `line_count`. Rejects binary files, non-UTF-8 files and files over 1 MB. |
 | `search_files` | `query` | Case-insensitive substring matches (`path`, `line_number`, `line`), plus `files_with_matches` and `files_searched`. Skips binary files, files over 1 MB and dependency/VCS folders (`.git`, `node_modules`, `.venv`, …). Capped at 100 matches. |
 | `search_code` | `query`, optional `path` (default `"."`; a directory or a single source file) | `matches` as `{file, line, text}`, plus `path`, `case_sensitive`, `files_searched`, `files_skipped` and `truncated`. See [Code search](#code-search). |
+| `analyze_repository` | none | Language counts, top directories, documentation, configuration, dependency manifests, lock files and tests. Possible entry points and framework indicators are kept separately under `heuristics`. See [Repository analysis](#repository-analysis). |
 
 Every tool returns **structured output**, and its JSON schema is published to the client. Every tool is also marked `readOnlyHint: true`. An expected failure, such as a missing file or a rejected path, comes back as a tool error (`isError: true`) with a clear message instead of crashing the server.
 
@@ -54,6 +56,85 @@ Example result for `search_code("format_price")` against the sample project:
 
 Oversized, binary (a NUL byte in the first 8 KB), non-UTF-8 and unreadable files are counted in `files_skipped` instead of causing an error. A query with no matches returns an empty `matches` list. An empty query, a missing path, a non-source file path, or a path outside the workspace returns a tool error.
 
+## Repository analysis
+
+`analyze_repository()` collects **objective facts** about the whole workspace so an AI client can orient itself before reading code. It works only from file names, paths and the fields declared in dependency manifests. It never executes repository code, package managers or tests, and it never writes anything.
+
+Output from the scratch full-stack repository used to test this phase (FastAPI backend, React/Express frontend), shortened:
+
+```json
+{
+  "total_files": 25,
+  "scan_complete": true,
+  "languages": {"JSON": 5, "Python": 5, "TypeScript": 4, "Markdown": 2, "YAML": 2, "Dockerfile": 1, "TOML": 1, "Text": 1},
+  "unclassified_files": 4,
+  "directories": [
+    {"path": "backend", "file_count": 10},
+    {"path": "frontend", "file_count": 8},
+    {"path": "backend/app", "file_count": 3}
+  ],
+  "documentation_files": ["LICENSE", "README.md", "docs/architecture.md"],
+  "configuration_files": [".gitignore", "docker-compose.yml", "backend/Dockerfile", "backend/pyproject.toml", "frontend/tsconfig.json", ".github/workflows/ci.yml"],
+  "dependency_manifests": ["backend/pyproject.toml", "backend/requirements.txt", "frontend/package.json"],
+  "lock_files": ["backend/uv.lock", "frontend/package-lock.json"],
+  "tests": {
+    "directories": ["backend/tests"],
+    "files": ["backend/tests/test_orders.py", "frontend/src/components/Cart.test.tsx"],
+    "file_count": 2
+  },
+  "heuristics": {
+    "possible_entry_points": [
+      {"file": "backend/pyproject.toml", "kind": "manifest", "detail": "[project.scripts] shop-api = app.main:run"},
+      {"file": "frontend/package.json", "kind": "manifest", "detail": "\"main\": \"src/index.tsx\""},
+      {"file": "backend/app/main.py", "kind": "filename", "detail": "conventional entry-point filename 'main.py'"}
+    ],
+    "framework_indicators": [
+      {"name": "FastAPI", "file": "backend/pyproject.toml", "evidence": "declares dependency 'fastapi'"},
+      {"name": "React", "file": "frontend/package.json", "evidence": "declares dependency 'react'"}
+    ]
+  },
+  "truncated_fields": [],
+  "warnings": []
+}
+```
+
+### Facts
+
+These are derived purely from paths:
+
+- **`languages`**: file counts by language. The language comes from the file extension (case-insensitive, e.g. `.py` → Python, `.cpp`/`.cc`/`.cxx` → C++, `.yml` → YAML) or from well-known names (`Dockerfile`, `Makefile`). It is ordered by count, then by name. Files with no recognized language are counted in `unclassified_files`.
+- **`directories`**: directories up to 2 levels deep with their recursive file counts, shallowest first. A directory is listed only if it contains at least one counted file.
+- **`documentation_files`**: `README`, `LICENSE`, `CHANGELOG`, `CONTRIBUTING` and similar files (any doc extension or none), plus `.md`, `.rst`, `.adoc` and `.txt` files under `docs/` or `doc/`.
+- **`configuration_files`**: known tool, build, container, CI and environment files, such as `pyproject.toml`, `tsconfig.json`, `Dockerfile`, `docker-compose.yml`, `.github/workflows/*.yml`, `.gitignore` and `.env.example`. A file can be both configuration and a manifest (e.g. `pyproject.toml`).
+- **`dependency_manifests`**: `pyproject.toml`, `requirements*.txt`, `setup.py`, `Pipfile`, `package.json`, `Cargo.toml`, `go.mod`, `pom.xml`, `build.gradle`, `Gemfile` and others.
+- **`lock_files`**: `package-lock.json`, `yarn.lock`, `poetry.lock`, `Pipfile.lock`, `uv.lock`, `Cargo.lock`, `go.sum` and others.
+- **`tests`**:
+  - Test directories are the outermost `tests/`, `test/`, `__tests__/` or `spec/` directories.
+  - Test files match naming conventions: `test_*.py`, `*_test.py`, `*.test.js`/`.ts`/`.tsx`, `*.spec.js`/`.ts`/`.tsx`, `*_test.go`, `*Test.java`, `*_spec.rb` and similar.
+  - Helpers such as `conftest.py` are not counted as test files.
+
+### Heuristics
+
+These are grouped separately because they are not confirmed facts:
+
+- **`possible_entry_points`**: entry points declared in manifests come first, then conventional filenames.
+  - Manifest entries come from `[project.scripts]`, `[project.gui-scripts]` and `[tool.poetry.scripts]` in `pyproject.toml`; `main`, `bin` and `scripts.start` in `package.json`; and `[[bin]]` in `Cargo.toml`.
+  - Conventional filenames include `main.py`, `app.py`, `server.py`, `manage.py`, `__main__.py`, `index.js`/`.ts`/`.tsx`, `main.go` and `main.rs`. Files inside test directories are excluded.
+- **`framework_indicators`**: a framework is reported **only when a manifest declares it as a dependency**. Each indicator names the manifest and the evidence.
+  - Python dependencies (normalized per PEP 503) are read from `pyproject.toml` (PEP 621, PEP 735 dependency groups and Poetry), `requirements*.txt` and `Pipfile`.
+  - JavaScript dependencies come from all `package.json` dependency sections, and Rust dependencies from `Cargo.toml`.
+  - `go.mod`, `pom.xml` and `build.gradle` are matched on exact module coordinates, e.g. `github.com/gin-gonic/gin` or `org.springframework.boot`.
+  - A file called `django.py` or a folder called `flask/` is never evidence.
+
+### Bounds and failures
+
+- Directories that `search_code` skips are skipped here too: VCS, dependency, cache and build output (`.git`, `.venv`, `node_modules`, `__pycache__`, `dist`, `build`, `*.egg-info`, …). Symlinks are not followed.
+- At most **20,000 files** are considered. If the scan stops early, `scan_complete` is `false`.
+- Every list holds at most **50 items**, shallowest paths first. `truncated_fields` names any list that was cut, and `tests.file_count` always gives the full count. A 3,000-file tree produces roughly 12 KB of output.
+- At most 20 manifests (up to 512 KB each) are parsed. `setup.py` is listed but never read, because it is code.
+- A manifest that is malformed, binary or unreadable becomes a `warnings` entry instead of failing the call. If the workspace root has disappeared, the call returns a tool error.
+- TOML manifests are parsed with the standard-library `tomllib` (Python 3.11+). On Python 3.10 they are listed with a warning but not parsed.
+
 ## Security model
 
 All paths are relative to the workspace root. `Workspace.resolve()` in `devpilot_mcp/workspace.py` is the only way a tool turns a path into a filesystem location. It:
@@ -62,7 +143,7 @@ All paths are relative to the workspace root. `Workspace.resolve()` in `devpilot
 2. joins the path to the root and calls `resolve()`, which collapses `..` and follows symlinks;
 3. checks that the result is still inside the root. If it isn't, the request is rejected (`../../secret.txt` fails here).
 
-A symlink inside the workspace that points outside it is hidden from `list_directory`, skipped by `search_files` and rejected by `read_file`. Error messages never include absolute host paths.
+A symlink inside the workspace that points outside it is hidden from `list_directory`, skipped by `search_files`, `search_code` and `analyze_repository`, and rejected by `read_file`. `analyze_repository` takes no path at all. It always analyzes the workspace root, and any extra arguments are dropped. Error messages never include absolute host paths.
 
 ## Project structure
 
@@ -77,7 +158,8 @@ DevPilot-MCP/
 │   └── tools/
 │       ├── common.py      # shared MCP helpers (read-only annotations, error mapping)
 │       ├── filesystem.py  # list_directory, read_file, search_files
-│       └── code_search.py # search_code
+│       ├── code_search.py # search_code
+│       └── repository.py  # analyze_repository
 ├── tests/                 # unittest suite (sandboxing, tool logic, in-process MCP client)
 ├── workspace/
 │   └── sample_project/    # small demo repo to explore with the tools
@@ -133,7 +215,7 @@ In the page that opens:
 1. Set **Transport Type** to `STDIO`.
 2. Set **Command** to the full path of `.venv\Scripts\devpilot-mcp.exe`. On macOS/Linux use `.venv/bin/devpilot-mcp`. Leave **Arguments** empty.
 3. Optionally, add `DEVPILOT_WORKSPACE` under **Environment Variables** to point the server at a different directory.
-4. Click **Connect**, open the **Tools** tab, then click **List Tools**. The four tools should appear.
+4. Click **Connect**, open the **Tools** tab, then click **List Tools**. The five tools should appear.
 5. Try these calls:
    - `list_directory` with `path` = `sample_project`
    - `read_file` with `path` = `sample_project/src/inventory.py`
@@ -144,6 +226,7 @@ In the page that opens:
    - `search_code` with `query` = `no_such_symbol`. Expect an empty `matches` list.
    - `search_code` with `query` = `x` and `path` = `../../secret`. The call should be rejected.
    - `read_file` with `path` = `../../secret.txt`. The call should be rejected with *"Path escapes the workspace root"*.
+   - `analyze_repository` with no arguments. Against the sample project, expect 4 files (`Python: 3`, `Markdown: 1`), the test directory `sample_project/tests` and empty `heuristics`, because the sample has no manifests. To analyze a real repository, set `DEVPILOT_WORKSPACE` in step 3 to that repository's path and reconnect.
 
 ### Inspector CLI (scriptable)
 
@@ -153,6 +236,8 @@ npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe --metho
 npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe --method tools/call --tool-name search_code --tool-arg query=class
 npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe --method tools/call --tool-name search_code --tool-arg query=def path=sample_project/src
 npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe --method tools/call --tool-name read_file --tool-arg path=../../secret.txt
+npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe --method tools/call --tool-name analyze_repository
+npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/other-repo --method tools/call --tool-name analyze_repository
 ```
 
 Launch the server through the `devpilot-mcp` executable rather than `python -m devpilot_mcp`. The Inspector CLI parses flags such as `-m` and `-e` itself, so they never reach the server.
@@ -167,4 +252,4 @@ The suite builds a temporary workspace with a `secret.txt` just outside it. It c
 
 ## Roadmap
 
-Phase 1 added read-only filesystem access and Phase 2 added code search. Later phases will be designed separately.
+Phase 1 added read-only filesystem access, Phase 2 added code search and Phase 3 added repository analysis. Later phases will be designed separately.
