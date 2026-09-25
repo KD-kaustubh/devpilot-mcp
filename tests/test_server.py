@@ -12,7 +12,11 @@ class ServerTests(WorkspaceTestCase, unittest.IsolatedAsyncioTestCase):
     async def test_tools_are_discoverable_and_read_only(self) -> None:
         async with Client(create_server(self.workspace)) as client:
             tools = {tool.name: tool for tool in (await client.list_tools()).tools}
-        self.assertEqual(set(tools), {"list_directory", "read_file", "search_files", "search_code", "analyze_repository"})
+        self.assertEqual(
+            set(tools),
+            {"list_directory", "read_file", "search_files", "search_code", "analyze_repository",
+             "git_status", "git_log", "git_diff", "git_branch"},
+        )  # fmt: skip
         for tool in tools.values():
             self.assertTrue(tool.annotations.read_only_hint)
 
