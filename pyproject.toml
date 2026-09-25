@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "devpilot-mcp"
+version = "0.1.0"
+description = "An MCP server that gives AI models safe, read-only access to a software repository."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=2.2,<3",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+devpilot-mcp = "devpilot_mcp.server:main"
+
+[tool.setuptools.packages.find]
+include = ["devpilot_mcp*"]
