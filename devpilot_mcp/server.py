@@ -8,13 +8,14 @@ from mcp.server.mcpserver import MCPServer
 
 from devpilot_mcp import __version__
 from devpilot_mcp.config import ConfigError, load_settings
-from devpilot_mcp.tools import filesystem
+from devpilot_mcp.tools import code_search, filesystem
 from devpilot_mcp.workspace import Workspace
 
 SERVER_INSTRUCTIONS = (
     "DevPilot gives read-only access to a single workspace directory. "
     "All paths are relative to the workspace root; absolute paths and '..' escapes are rejected. "
-    "Start with list_directory('.') to explore, search_files to locate code, and read_file to inspect it."
+    "Start with list_directory('.') to explore, search_code to locate code (search_files for any text file), "
+    "and read_file to inspect it."
 )
 
 
@@ -22,6 +23,7 @@ def create_server(workspace: Workspace) -> MCPServer:
     """Build an MCP server with all DevPilot tools bound to `workspace`."""
     server = MCPServer(name="DevPilot MCP", version=__version__, instructions=SERVER_INSTRUCTIONS)
     filesystem.register(server, workspace)
+    code_search.register(server, workspace)
     return server
 
 

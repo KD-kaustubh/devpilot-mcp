@@ -7,34 +7,22 @@ so the client sees a clear message.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Literal
 
 from mcp.server.mcpserver import MCPServer
-from mcp.server.mcpserver.exceptions import ToolError
-from mcp_types import ToolAnnotations
 from pydantic import BaseModel
 
+from devpilot_mcp.text_search import NotATextFileError, iter_files, read_text, scan_files
+from devpilot_mcp.tools.common import READ_ONLY, as_tool_error
 from devpilot_mcp.workspace import PathNotFoundError, Workspace, WorkspaceError
+
+__all__ = ["NotATextFileError", "list_directory", "read_file", "search_files", "register"]
 
 MAX_READ_BYTES = 1_000_000
 MAX_SEARCH_FILE_BYTES = 1_000_000
 MAX_LIST_ENTRIES = 500
 MAX_SEARCH_MATCHES = 100
-MAX_LINE_PREVIEW_CHARS = 200
-BINARY_SNIFF_BYTES = 8192
-
-# Directories that are almost never useful to search and can be very large.
-SKIPPED_SEARCH_DIRS = frozenset(
-    {".git", ".hg", ".svn", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache", ".tox"}
-)
-
-READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False)
-
-
-class NotATextFileError(WorkspaceError):
-    """The file is binary, not valid UTF-8, or too large to return."""
 
 
 # --- Result models (these also become the tools' output schemas) -------------
@@ -76,22 +64,6 @@ class SearchResults(BaseModel):
 
 
 # --- Helpers -----------------------------------------------------------------
-
-
-def _looks_binary(sample: bytes) -> bool:
-    """Heuristic used by git and grep: a NUL byte means binary."""
-    return b"\x00" in sample
-
-
-def _read_text(path: Path) -> str:
-    """Read a file as UTF-8 text, raising NotATextFileError if it isn't text."""
-    data = path.read_bytes()
-    if _looks_binary(data[:BINARY_SNIFF_BYTES]):
-        raise NotATextFileError("File appears to be binary.")
-    try:
-        return data.decode("utf-8-sig")
-    except UnicodeDecodeError as exc:
-        raise NotATextFileError("File is not valid UTF-8 text.") from exc
 
 
 def _entry_type(path: Path) -> Literal["file", "directory", "other"]:
@@ -151,7 +123,7 @@ def read_file(workspace: Workspace, path: str) -> FileContent:
     if size > MAX_READ_BYTES:
         raise NotATextFileError(f"File is too large to read ({size:,} bytes; limit is {MAX_READ_BYTES:,}).")
 
-    content = _read_text(target)
+    content = read_text(target)
     return FileContent(
         path=workspace.relative(target),
         size_bytes=size,
@@ -170,63 +142,23 @@ def search_files(workspace: Workspace, query: str) -> SearchResults:
         raise WorkspaceError("Search query must not be empty.")
     needle = query.lower()
 
-    matches: list[SearchMatch] = []
-    files_with_matches: list[str] = []
-    files_searched = 0
-    truncated = False
-
-    for dirpath, dirnames, filenames in os.walk(workspace.root, followlinks=False):
-        dirnames[:] = sorted(d for d in dirnames if d not in SKIPPED_SEARCH_DIRS)
-        for filename in sorted(filenames):
-            file_path = Path(dirpath) / filename
-            if file_path.is_symlink() or not file_path.is_file():
-                continue
-            try:
-                if file_path.stat().st_size > MAX_SEARCH_FILE_BYTES:
-                    continue
-                text = _read_text(file_path)
-            except (OSError, NotATextFileError):
-                continue
-
-            files_searched += 1
-            rel_path = workspace.relative(file_path)
-            found_in_file = False
-            for line_number, line in enumerate(text.splitlines(), start=1):
-                if needle not in line.lower():
-                    continue
-                if len(matches) >= MAX_SEARCH_MATCHES:
-                    truncated = True
-                    break
-                found_in_file = True
-                matches.append(
-                    SearchMatch(path=rel_path, line_number=line_number, line=line.strip()[:MAX_LINE_PREVIEW_CHARS])
-                )
-            if found_in_file:
-                files_with_matches.append(rel_path)
-            if truncated:
-                break
-        if truncated:
-            break
-
+    scan = scan_files(
+        workspace,
+        iter_files(workspace.root),
+        lambda line: needle in line.lower(),
+        max_matches=MAX_SEARCH_MATCHES,
+        max_file_bytes=MAX_SEARCH_FILE_BYTES,
+    )
     return SearchResults(
         query=query,
-        matches=matches,
-        files_with_matches=files_with_matches,
-        files_searched=files_searched,
-        truncated=truncated,
+        matches=[SearchMatch(path=m.path, line_number=m.line_number, line=m.line) for m in scan.matches],
+        files_with_matches=scan.files_with_matches,
+        files_searched=scan.files_searched,
+        truncated=scan.truncated,
     )
 
 
 # --- MCP registration --------------------------------------------------------
-
-
-def _as_tool_error(exc: Exception) -> ToolError:
-    """Convert an anticipated failure into a message safe to show the client."""
-    if isinstance(exc, WorkspaceError):
-        return ToolError(str(exc))
-    # OSError messages can include absolute paths; only expose the reason.
-    reason = exc.strerror if isinstance(exc, OSError) and exc.strerror else "unknown error"
-    return ToolError(f"Filesystem error: {reason}.")
 
 
 def register(server: MCPServer, workspace: Workspace) -> None:
@@ -242,7 +174,7 @@ def register(server: MCPServer, workspace: Workspace) -> None:
         try:
             return list_directory(workspace, path)
         except (WorkspaceError, OSError) as exc:
-            raise _as_tool_error(exc) from exc
+            raise as_tool_error(exc) from exc
 
     @server.tool(name="read_file", annotations=READ_ONLY)
     def read_file_tool(path: str) -> FileContent:
@@ -254,7 +186,7 @@ def register(server: MCPServer, workspace: Workspace) -> None:
         try:
             return read_file(workspace, path)
         except (WorkspaceError, OSError) as exc:
-            raise _as_tool_error(exc) from exc
+            raise as_tool_error(exc) from exc
 
     @server.tool(name="search_files", annotations=READ_ONLY)
     def search_files_tool(query: str) -> SearchResults:
@@ -268,4 +200,4 @@ def register(server: MCPServer, workspace: Workspace) -> None:
         try:
             return search_files(workspace, query)
         except (WorkspaceError, OSError) as exc:
-            raise _as_tool_error(exc) from exc
+            raise as_tool_error(exc) from exc
