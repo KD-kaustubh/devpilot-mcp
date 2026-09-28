@@ -4,7 +4,8 @@ Git runs as a subprocess, so every invocation goes through `_run_git`, which
 is the execution boundary:
 
 - Only subcommands in ALLOWED_SUBCOMMANDS can run, and they are only ever used
-  in read-only forms built here. Tool input is limited to a validated integer
+  in read-only forms built here (`remote` is further limited to `get-url`,
+  which the GitHub tools use to discover the repository). Tool input is limited to a validated integer
   (`limit`), a boolean (`staged`) and a workspace-validated path passed after
   `--` with literal pathspecs, so input can never become a Git option or command.
 - An argument list is used with shell=False, and cwd is always the workspace root.
@@ -44,7 +45,7 @@ MAX_BRANCHES = 100
 MAX_COMMIT_BODY_CHARS = 2_000
 MAX_ERROR_CHARS = 300
 
-ALLOWED_SUBCOMMANDS = frozenset({"status", "log", "diff", "diff-files", "branch", "rev-parse"})
+ALLOWED_SUBCOMMANDS = frozenset({"status", "log", "diff", "diff-files", "branch", "rev-parse", "remote"})
 
 # Applied to every invocation as `git -c key=value`.
 SAFE_CONFIG = (
@@ -278,6 +279,8 @@ def _run_git(
     """Run one allow-listed, read-only Git subcommand in the workspace root."""
     if subcommand not in ALLOWED_SUBCOMMANDS:
         raise GitCommandNotAllowedError(f"Git subcommand '{subcommand}' is not permitted.")
+    if subcommand == "remote" and args[:1] != ("get-url",):  # add/remove/set-url would write config
+        raise GitCommandNotAllowedError("Only 'git remote get-url' is permitted.")
     root = _workspace_root(workspace)
     git = shutil.which("git")
     if git is None:
@@ -305,6 +308,23 @@ def _require_repository(workspace: Workspace) -> None:
     toplevel = Path(result.stdout.decode("utf-8", "replace").strip())
     if toplevel.resolve() != root:
         raise NotAGitRepositoryError("The workspace is inside a Git work tree but is not its root.")
+
+
+def read_remote_url(workspace: Workspace, name: str = "origin") -> str | None:
+    """The configured URL of a remote in the workspace repository, or None if it doesn't exist.
+
+    Uses `git remote get-url`, which only reads configuration (applying any
+    url.<base>.insteadOf rewrites) and never contacts the remote.
+    """
+    if not name.replace("-", "").replace("_", "").replace(".", "").isalnum():
+        raise GitCommandNotAllowedError("Invalid remote name.")
+    _require_repository(workspace)
+    result = _run_git(workspace, "remote", "get-url", name, check=False)
+    if result.returncode != 0:
+        if "no such remote" in result.stderr.lower():
+            return None
+        raise GitCommandError(f"git remote failed: {_clean_error(result.stderr, _workspace_root(workspace))}")
+    return _decode(result.stdout).strip() or None
 
 
 def _has_commits(workspace: Workspace) -> bool:

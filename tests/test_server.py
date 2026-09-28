@@ -15,7 +15,8 @@ class ServerTests(WorkspaceTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             set(tools),
             {"list_directory", "read_file", "search_files", "search_code", "analyze_repository",
-             "git_status", "git_log", "git_diff", "git_branch"},
+             "git_status", "git_log", "git_diff", "git_branch",
+             "github_repository", "github_issues", "github_pull_requests"},
         )  # fmt: skip
         for tool in tools.values():
             self.assertTrue(tool.annotations.read_only_hint)
