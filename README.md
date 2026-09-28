@@ -8,7 +8,8 @@ It is being built in phases:
 - **Phase 2: code search.** `search_code` searches source files only and can be limited to a subdirectory or file.
 - **Phase 3: repository understanding.** `analyze_repository` returns a deterministic, factual overview of the repository.
 - **Phase 4: Git intelligence.** `git_status`, `git_log`, `git_diff` and `git_branch` give read-only, structured Git information.
-- **Phase 5 (this release): GitHub integration.** `github_repository`, `github_issues` and `github_pull_requests` read objective GitHub facts for the repository behind the workspace's `origin` remote.
+- **Phase 5: GitHub integration.** `github_repository`, `github_issues` and `github_pull_requests` read objective GitHub facts for the repository behind the workspace's `origin` remote.
+- **Phase 6 (this release): developer investigation.** `investigate_repository(query)` gathers ranked, bounded evidence for a developer question: relevant files, matching lines, source excerpts, and Git and GitHub context. The consuming AI then reasons over that evidence.
 
 The server never touches anything outside one configured workspace directory.
 
@@ -27,6 +28,7 @@ The server never touches anything outside one configured workspace directory.
 | `git_branch` | none | The current branch (`detached` flag) and the local branches with short commit and upstream. |
 | `github_repository` | none | GitHub metadata for the `origin` repository: description, default branch, visibility, flags, timestamps, language, license, topics and counts. See [GitHub tools](#github-tools). |
 | `github_issues` | `state` (`open`/`closed`/`all`, default `open`), `limit` (1–50, default 10) | Issues only (pull requests excluded and counted), newest first: number, title, state, author, labels, assignees, comment count, timestamps and URL. `has_more`. |
+| `investigate_repository` | `query` (1–500 characters) | Structured **evidence** for a developer question, not an answer: search terms, repository facts, ranked relevant files and directories with reasons, matching lines, source excerpts, and Git and GitHub context. See [Developer investigation](#developer-investigation). |
 | `github_pull_requests` | `state` (`open`/`closed`/`all`, default `open`), `limit` (1–50, default 10) | Pull requests, newest first: number, title, state, draft, author, timestamps including `merged_at`, source and target branch and repository, labels, assignees, requested reviewers and teams, and URL. `has_more`. |
 
 Every tool returns **structured output**, and its JSON schema is published to the client. Every tool is also marked `readOnlyHint: true`. An expected failure, such as a missing file or a rejected path, comes back as a tool error (`isError: true`) with a clear message instead of crashing the server.
@@ -415,6 +417,141 @@ These become tool errors with a clear message:
 - **Issues in pull-request-heavy repositories.** With only 3 pages scanned, `github_issues` can return fewer than `limit` issues, with `has_more: true`.
 - **Proxies.** HTTPS proxies set through the standard `HTTPS_PROXY` environment variable are used, as with any `urllib` client.
 
+## Developer investigation
+
+`investigate_repository(query)` is the entry point for questions such as:
+
+- *"How is authentication implemented?"*
+- *"Where is CSV processing implemented?"*
+- *"What parts of the repository are involved in payment processing?"*
+- *"How are MCP tools registered?"*
+
+### DevPilot gathers evidence; the AI reasons
+
+The tool **never answers the question**. It calls no LLM, generates no explanation or plan, and makes no claim of semantic understanding.
+
+- **DevPilot's job:** collect objective, bounded, deterministic evidence from the repository, its Git history and GitHub.
+- **The consuming AI's job** (Gemini, Claude, …): read that evidence, draw conclusions and write the explanation or plan. It can call `read_file`, `search_code` or `git_diff` to dig deeper.
+
+Every result carries an `evidence_note` saying so.
+
+### How evidence is gathered
+
+It reuses the existing read-only building blocks rather than new logic:
+
+| Step | Reuses |
+|------|--------|
+| 1. Turn the query into search terms (keyword heuristic, below) | — |
+| 2. Repository facts: languages, top directories, manifests, tests, entry points, frameworks | `analyze_repository` (Phase 3) |
+| 3. Match the terms against file paths and file contents | the `search_code` file walker and line scanner (Phase 2), with the same ignored directories, binary detection and size limits |
+| 4. Rank files, directories and matching lines | — |
+| 5. Short excerpts around the strongest matches in the top files | `read_file` (Phase 1): workspace-validated, text-only |
+| 6. Git context: branch, clean/dirty, relevant changed files, recent commits, commits whose message mentions a term, short diffs of relevant changed files | `git_status`, `git_log`, `git_diff` (Phase 4 execution boundary) |
+| 7. GitHub context: repository summary, and open issues and PRs whose title, labels or branch mention a term | `github_repository`, `github_issues`, `github_pull_requests` (Phase 5 client) |
+
+**Search-term heuristic.** It is deliberately simple and deterministic, and it does not understand language:
+
+1. Lower-case the query and split it into words.
+2. Drop common English and question words ("how", "is", "implemented", "where", "code", …), words shorter than 3 characters, and pure numbers.
+3. Stem each word lightly. For example, `uploads` → `upload`, `processing` → `process` and `structured` → `structur`. Matching is case-insensitive and by substring, so a stem still matches every form of the word.
+4. Add a few synonyms from a small fixed table, e.g. `authentication` → `auth`, `login`, and `configuration` → `config`, `settings`.
+
+Query words come first in the order they appear, then synonyms, up to 8 terms. For example, *"How is authentication implemented?"* gives `authentication`, then `auth` and `login` as synonyms. The terms used are returned in `search_terms`.
+
+**Relevance ranking.** Also deterministic, with no embeddings, ML or external services:
+
+1. For each term, a file gets:
+   - 10 points if its **file name** contains the term, or 4 if a **directory** in its path does;
+   - 2 + min(matching lines, 5) points for **content** matches.
+2. Each term's points are multiplied by:
+   - its **weight**: 2 for a query word, 1 for a synonym;
+   - its **rarity**, `ln(1 + files / files containing the term)`. A term found everywhere, like the package name, counts for little.
+3. Each additional distinct term the file matches adds 4 points.
+4. The total is scaled by **file kind**: source ×1.0, tests ×0.7, documentation ×0.6. Implementations come first, but tests and docs stay visible.
+5. Files are sorted by score, then by path. Matching lines are grouped by file in that order, strongest lines first within a file's budget, and listed by line number.
+
+Every relevant file includes `reasons`, such as `"file name contains 'github'"` or `"12 matching lines for 'auth'"`, so the ranking can be checked.
+
+### Output
+
+`investigate_repository("Where is GitHub integration implemented?")` on this repository, shortened:
+
+```json
+{
+  "query": "Where is GitHub integration implemented?",
+  "evidence_note": "Evidence only: DevPilot extracted search terms with a keyword heuristic and collected matching repository facts. It did not interpret the question or answer it, and the evidence may be incomplete.",
+  "search_terms": [{"term": "github", "source": "query"}, {"term": "integration", "source": "query"}],
+  "repository": {"name": "DevPilot-MCP", "total_files": 35, "languages": {"Python": 30, "Markdown": 2, "TOML": 1},
+                 "top_directories": ["devpilot_mcp", "tests", "workspace"], "framework_indicators": ["MCP Python SDK"], "…": "…"},
+  "relevant_files": [
+    {"path": "tests/test_github.py", "kind": "test", "score": 45, "matched_terms": ["github", "integration"],
+     "reasons": ["file name contains 'github'", "217 matching lines for 'github'", "1 matching line for 'integration'"]},
+    {"path": "devpilot_mcp/tools/github.py", "kind": "source", "score": 43, "matched_terms": ["github"],
+     "reasons": ["file name contains 'github'", "62 matching lines for 'github'"]},
+    {"path": "devpilot_mcp/github/client.py", "kind": "source", "score": 28, "…": "…"}
+  ],
+  "relevant_directories": [{"path": "devpilot_mcp/tools", "relevant_files": 4, "score": 84},
+                           {"path": "devpilot_mcp/github", "relevant_files": 3, "score": 76}],
+  "code_matches": [{"file": "devpilot_mcp/tools/github.py", "line": 1, "text": "\"\"\"Read-only GitHub tools: …", "terms": ["github"], "kind": "source"}],
+  "file_context": [{"path": "devpilot_mcp/tools/github.py", "start_line": 1, "end_line": 8, "content": "…", "truncated": false}],
+  "git_context": {"available": true, "branch": "main", "clean": false,
+                  "relevant_commits": [{"short_hash": "377f6af", "subject": "Implement Phase 5 GitHub integration",
+                                        "matched_terms": ["github", "integration"], "…": "…"}], "…": "…"},
+  "github_context": {"available": true, "repository": {"full_name": "KD-kaustubh/devpilot-mcp", "…": "…"},
+                     "relevant_issues": [], "relevant_pull_requests": [], "open_issues_scanned": 0, "authenticated": false},
+  "files_scanned": 33,
+  "warnings": [],
+  "truncated_fields": ["relevant_files", "code_matches"],
+  "limits": {"max_relevant_files": 10, "max_code_matches": 30, "…": "…"}
+}
+```
+
+### Bounded results
+
+| Evidence | Limit |
+|----------|-------|
+| Query | 1–500 characters; empty or whitespace-only queries are rejected |
+| Search terms | 8 |
+| Files considered / line matches scanned | 20,000 / 2,000; files whose path matches a term are scanned first |
+| Relevant files / directories | 10 / 5 |
+| Matching lines | 30 in total, at most 5 per file, each line up to 200 characters |
+| Source excerpts | the top 3 files with content matches, up to 2 windows each, ±4 lines around a match, lines cut at 300 characters, **12 KB in total** |
+| Git | 50 commits scanned, 5 recent and 5 relevant commits, 20 relevant changed files, 2 diffs of up to 4,000 characters |
+| GitHub | the 30 newest open issues and 30 newest open PRs scanned, 5 relevant of each |
+
+- **Visible limits:** the `limits` field repeats these values. Any list that was cut is named in `truncated_fields`, and incomplete evidence (scan limits, unreadable files, Git or GitHub failures) is explained in `warnings`.
+- **Size:** answers on this repository are 15–18 KB.
+- **Not exhaustive:** the tool never claims to have found *all* relevant code.
+
+### Git and GitHub context
+
+- **Git context:** needs the workspace to be a Git repository root, as for the Git tools. Otherwise `git_context.available` is `false` with a reason, and the local evidence is still returned. A Git failure, such as a timeout, becomes a warning, not an error.
+- **GitHub context:** best effort, and only when `origin` is a github.com repository.
+  - It uses the Phase 5 read-only client: three fixed GET endpoints, and `GITHUB_TOKEN` is optional.
+  - If GitHub fails (offline, rate-limited, 404…), no further GitHub requests are made, a warning is added, and the local investigation is returned in full.
+  - An investigation costs at most 3 GitHub requests in the common case: repository, issues and pull requests. The issues request may take up to 3 pages. Unauthenticated use is limited to 60 GitHub requests per hour.
+
+### Security
+
+The tool only composes the existing read-only boundaries, so everything in [Security model](#security-model), [Read-only execution boundary](#read-only-execution-boundary) and [Read-only HTTP boundary](#read-only-http-boundary) applies:
+
+- **Input:** the only input is `query`. It is used as search text, never as a path, command, URL or endpoint. Extra MCP arguments are dropped.
+- **Nothing runs or changes:** no shell, no repository code, scripts, package managers, tests or hooks are run, and no file or Git state is modified. A test hashes every file, `.git` included.
+- **Git:** only the Phase 4 allowlisted read-only subcommands run.
+- **GitHub:** only the three Phase 5 GET endpoints are called.
+- **Secrets:**
+  - Likely secret files (`.env*` except templates such as `.env.example`, `*.pem`, `*.key`, SSH keys, `credentials.json`, `secrets.*`, `.npmrc`, `.pypirc`, `.netrc`) are never used as evidence.
+  - Secret-looking values in the evidence are replaced with `[REDACTED]`, with a warning. These are GitHub tokens, AWS access key IDs, private-key headers and the configured `GITHUB_TOKEN`.
+  - The token never appears in output, errors or logs.
+
+### Limitations
+
+- **Keyword heuristic, not understanding.** Synonyms outside the small table, typos and conceptual questions ("why is it slow?") are not bridged. Ask with concrete names for better evidence.
+- **Substring matching** can over-match short terms, e.g. `auth` in `author`. Ranking by rarity reduces, but does not remove, this noise.
+- **Self-reference.** When investigating DevPilot itself, `tools/investigation.py` matches many queries, because it contains the heuristic's own vocabulary and example queries.
+- **Scan budget.** In very large repositories the 2,000-line scan budget can run out; `truncated_fields` then includes `search_scan`.
+- **Recent items only.** Only the newest 30 open GitHub issues and PRs, and the last 50 commits, are checked for relevance.
+
 ## Security model
 
 All paths are relative to the workspace root. `Workspace.resolve()` in `devpilot_mcp/workspace.py` is the only way a tool turns a path into a filesystem location. It:
@@ -444,7 +581,8 @@ DevPilot-MCP/
 │       ├── code_search.py # search_code
 │       ├── repository.py  # analyze_repository
 │       ├── git.py         # git_status, git_log, git_diff, git_branch
-│       └── github.py      # github_repository, github_issues, github_pull_requests
+│       ├── github.py      # github_repository, github_issues, github_pull_requests
+│       └── investigation.py # investigate_repository
 ├── tests/                 # unittest suite (sandboxing, tool logic, in-process MCP client)
 ├── workspace/
 │   └── sample_project/    # small demo repo to explore with the tools
@@ -501,7 +639,7 @@ In the page that opens:
 1. Set **Transport Type** to `STDIO`.
 2. Set **Command** to the full path of `.venv\Scripts\devpilot-mcp.exe`. On macOS/Linux use `.venv/bin/devpilot-mcp`. Leave **Arguments** empty.
 3. Optionally, add `DEVPILOT_WORKSPACE` under **Environment Variables** to point the server at a different directory.
-4. Click **Connect**, open the **Tools** tab, then click **List Tools**. The twelve tools should appear.
+4. Click **Connect**, open the **Tools** tab, then click **List Tools**. The thirteen tools should appear.
 5. Try these calls:
    - `list_directory` with `path` = `sample_project`
    - `read_file` with `path` = `sample_project/src/inventory.py`
@@ -513,6 +651,7 @@ In the page that opens:
    - `search_code` with `query` = `x` and `path` = `../../secret`. The call should be rejected.
    - `read_file` with `path` = `../../secret.txt`. The call should be rejected with *"Path escapes the workspace root"*.
    - `git_status`, `git_log`, `git_diff` and `git_branch`. Against the default `./workspace` these return *"The workspace is not a Git repository"*, because `./workspace` is a plain folder. Set `DEVPILOT_WORKSPACE` to a repository root, e.g. this project's directory, and reconnect. Then try `git_log` with `limit` = `3`, and `git_diff` with and without `staged` = `true` after editing or staging a file.
+   - `investigate_repository` with `query` = `Where is GitHub integration implemented?`. The result is evidence (ranked files with reasons, matching lines, excerpts, Git and GitHub context), not an answer. Try also `How is this project structured?`, `How are MCP tools registered?` and `How is workspace security implemented?`. A whitespace-only query is rejected.
    - `github_repository`, `github_issues` with `limit` = `5`, and `github_pull_requests` with `limit` = `5`. Like the Git tools, these need `DEVPILOT_WORKSPACE` to be a repository root whose `origin` points to github.com, e.g. this project's directory. A repository with no issues or pull requests returns empty lists. Also try `state` = `merged` or `limit` = `51`; both are rejected.
    - `analyze_repository` with no arguments. Against the sample project, expect 4 files (`Python: 3`, `Markdown: 1`), the test directory `sample_project/tests` and empty `heuristics`, because the sample has no manifests. To analyze a real repository, set `DEVPILOT_WORKSPACE` in step 3 to that repository's path and reconnect.
 
@@ -532,6 +671,7 @@ npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVP
 npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-github-clone --method tools/call --tool-name github_repository
 npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-github-clone --method tools/call --tool-name github_issues --tool-arg state=all limit=5
 npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-github-clone --method tools/call --tool-name github_pull_requests --tool-arg limit=5
+npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-repo --method tools/call --tool-name investigate_repository --tool-arg "query=How is authentication implemented?"
 ```
 
 Launch the server through the `devpilot-mcp` executable rather than `python -m devpilot_mcp`. The Inspector CLI parses flags such as `-m` and `-e` itself, so they never reach the server.
@@ -542,8 +682,10 @@ Launch the server through the `devpilot-mcp` executable rather than `python -m d
 python -m unittest discover -s tests -t . -v
 ```
 
-The suite builds a temporary workspace with a `secret.txt` just outside it. It checks the path-escape attempts listed under [Security model](#security-model), every tool's normal and error cases, and full round trips through an in-process MCP client. The Git tests need `git` on `PATH`. They build throwaway repositories with an isolated Git config, and are skipped if Git is not installed. The GitHub tests **never contact GitHub**. Tool and client tests use a fake transport, and the HTTP transport is tested against local `127.0.0.1` servers. On Windows the symlink-escape test is skipped unless Developer Mode is on, because creating symlinks requires it.
+The suite builds a temporary workspace with a `secret.txt` just outside it. It checks the path-escape attempts listed under [Security model](#security-model), every tool's normal and error cases, and full round trips through an in-process MCP client. The Git tests need `git` on `PATH`. They build throwaway repositories with an isolated Git config, and are skipped if Git is not installed. The GitHub tests **never contact GitHub**. Tool and client tests use a fake transport, and the HTTP transport is tested against local `127.0.0.1` servers. The investigation tests use a fake GitHub client, real throwaway Git repositories and hashes of every file before and after. On Windows the symlink-escape test is skipped unless Developer Mode is on, because creating symlinks requires it.
+
+Current result: **257 tests, 255 passed, 2 skipped** (the two Windows symlink tests), 0 failed.
 
 ## Roadmap
 
-Phase 1 added read-only filesystem access, Phase 2 added code search, Phase 3 added repository analysis, Phase 4 added read-only Git intelligence and Phase 5 added read-only GitHub integration. Later phases will be designed separately.
+Phase 1 added read-only filesystem access, Phase 2 added code search, Phase 3 added repository analysis, Phase 4 added read-only Git intelligence, Phase 5 added read-only GitHub integration and Phase 6 added evidence gathering for developer investigation. DevPilot remains read-only: it gathers evidence and never edits code. Later phases will be designed separately.
