@@ -41,8 +41,8 @@ from devpilot_mcp.patching.unified_diff import (
     parse_patch,
     split_lines,
 )
+from devpilot_mcp.sensitive import SECRET_FILE_PATTERNS
 from devpilot_mcp.text_search import BINARY_SNIFF_BYTES
-from devpilot_mcp.tools.investigation import SECRET_FILE_PATTERNS
 from devpilot_mcp.workspace import Workspace, WorkspaceError
 
 # --- Limits ------------------------------------------------------------------

@@ -11,18 +11,12 @@ from __future__ import annotations
 from typing import Annotated, Literal
 
 from mcp.server.mcpserver import MCPServer
-from mcp_types import ToolAnnotations
 from pydantic import BaseModel, Field
 
 from devpilot_mcp.patching import changes
 from devpilot_mcp.patching.changes import CHANGE_ID_PATTERN, MAX_PATCH_BYTES, ChangeRegistry, sha256
-from devpilot_mcp.tools.common import as_tool_error
+from devpilot_mcp.tools.common import WRITES_FILES, as_tool_error
 from devpilot_mcp.workspace import Workspace, WorkspaceError
-
-# Not read-only: these tools write files. Destructive: a patch can delete files.
-WRITE_ANNOTATIONS = ToolAnnotations(
-    read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=False
-)
 
 
 class PatchedFile(BaseModel):
@@ -100,7 +94,7 @@ def register(server: MCPServer, workspace: Workspace, registry: ChangeRegistry |
     """Expose apply_patch and revert_patch; changes are tracked in a per-server in-memory registry."""
     registry = registry or ChangeRegistry()
 
-    @server.tool(name="apply_patch", annotations=WRITE_ANNOTATIONS)
+    @server.tool(name="apply_patch", annotations=WRITES_FILES)
     def apply_patch_tool(patch: Annotated[str, Field(min_length=1, max_length=MAX_PATCH_BYTES)]) -> ApplyPatchResult:
         """Apply an explicit unified diff that YOU supply to text files in the workspace. Writes files.
 
@@ -124,7 +118,7 @@ def register(server: MCPServer, workspace: Workspace, registry: ChangeRegistry |
         except (WorkspaceError, OSError) as exc:
             raise as_tool_error(exc) from exc
 
-    @server.tool(name="revert_patch", annotations=WRITE_ANNOTATIONS)
+    @server.tool(name="revert_patch", annotations=WRITES_FILES)
     def revert_patch_tool(change_id: Annotated[str, Field(pattern=CHANGE_ID_PATTERN)]) -> RevertPatchResult:
         """Undo a change made by apply_patch in this server session, restoring the exact previous bytes. Writes files.
 

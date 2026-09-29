@@ -28,6 +28,54 @@ class ServerTests(WorkspaceTestCase, unittest.IsolatedAsyncioTestCase):
             else:
                 self.assertTrue(tool.annotations.read_only_hint)
 
+    async def test_annotation_profiles_are_intentional(self) -> None:
+        """Every tool's full annotation profile, pinned (see the semantics in tools/common.py).
+
+        openWorldHint is true only where repository test code can run; DevPilot's own network
+        access goes to one fixed host (api.github.com), so GitHub-reading tools are closed-world.
+        """
+        read_only = (True, False, True, False)  # (readOnly, destructive, idempotent, openWorld)
+        writes_files = (False, True, False, False)
+        executes_code = (False, True, False, True)
+        expected = {
+            "list_directory": read_only, "read_file": read_only, "search_files": read_only,
+            "search_code": read_only, "analyze_repository": read_only,
+            "git_status": read_only, "git_log": read_only, "git_diff": read_only, "git_branch": read_only,
+            "github_repository": read_only, "github_issues": read_only, "github_pull_requests": read_only,
+            "investigate_repository": read_only, "get_test_commands": read_only,
+            "apply_patch": writes_files, "revert_patch": writes_files,
+            "run_tests": executes_code, "validate_repository": executes_code,
+        }  # fmt: skip
+        async with Client(create_server(self.workspace)) as client:
+            tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+        self.assertEqual(len(tools), 18)
+        actual = {
+            name: (t.annotations.read_only_hint, t.annotations.destructive_hint,
+                   t.annotations.idempotent_hint, t.annotations.open_world_hint)
+            for name, t in tools.items()
+        }  # fmt: skip
+        self.assertEqual(actual, expected)
+        self.assertEqual({n for n, a in actual.items() if a[3]}, {"run_tests", "validate_repository"})
+
+    async def test_search_files_path_round_trip(self) -> None:
+        async with Client(create_server(self.workspace)) as client:
+            tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+            schema = tools["search_files"].input_schema
+            scoped = await client.call_tool("search_files", {"query": "hello", "path": "src"})
+            whole = await client.call_tool("search_files", {"query": "hello"})
+            escapes = [
+                await client.call_tool("search_files", {"query": "TOP SECRET", "path": attack})
+                for attack in ("../", str(self.secret), "C:\\Windows", "\\\\server\\share")
+            ]
+        self.assertEqual(set(schema["properties"]), {"query", "path"})
+        self.assertEqual(schema["properties"]["path"]["default"], ".")
+        self.assertEqual(schema["required"], ["query"])
+        self.assertEqual(scoped.structured_content["files_with_matches"], ["src/app.py"])
+        self.assertEqual(whole.structured_content["files_with_matches"], ["README.md", "src/app.py"])
+        for result in escapes:
+            self.assertTrue(result.is_error)
+            self.assertNotIn("TOP SECRET", result.content[0].text)
+
     async def test_successful_calls_return_structured_content(self) -> None:
         async with Client(create_server(self.workspace)) as client:
             listing = await client.call_tool("list_directory", {"path": "."})

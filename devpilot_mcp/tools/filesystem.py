@@ -132,19 +132,24 @@ def read_file(workspace: Workspace, path: str) -> FileContent:
     )
 
 
-def search_files(workspace: Workspace, query: str) -> SearchResults:
-    """Case-insensitive substring search across all text files in the workspace.
+def search_files(workspace: Workspace, query: str, path: str = ".") -> SearchResults:
+    """Case-insensitive substring search across text files under `path` (default: the whole workspace).
 
     Binary files, files larger than MAX_SEARCH_FILE_BYTES, and common
     dependency/VCS directories are skipped. Symlinks are not followed.
+    `path` goes through the same Workspace boundary as every other tool.
     """
     if not query or not query.strip():
         raise WorkspaceError("Search query must not be empty.")
     needle = query.lower()
 
+    target = workspace.resolve(path)
+    if not target.exists():
+        raise PathNotFoundError(f"Search path not found: '{path}'.")
+
     scan = scan_files(
         workspace,
-        iter_files(workspace.root),
+        iter_files(target),
         lambda line: needle in line.lower(),
         max_matches=MAX_SEARCH_MATCHES,
         max_file_bytes=MAX_SEARCH_FILE_BYTES,
@@ -189,15 +194,17 @@ def register(server: MCPServer, workspace: Workspace) -> None:
             raise as_tool_error(exc) from exc
 
     @server.tool(name="search_files", annotations=READ_ONLY)
-    def search_files_tool(query: str) -> SearchResults:
-        """Search all text files in the workspace for a case-insensitive substring.
+    def search_files_tool(query: str, path: str = ".") -> SearchResults:
+        """Search text files in the workspace for a case-insensitive substring.
 
-        Returns each matching line with its file path and line number.
+        Returns each matching line with its file path (relative to the workspace root) and
+        line number.
 
         Args:
             query: Text to search for.
+            path: Directory or file to search, relative to the workspace root. Defaults to the whole workspace.
         """
         try:
-            return search_files(workspace, query)
+            return search_files(workspace, query, path)
         except (WorkspaceError, OSError) as exc:
             raise as_tool_error(exc) from exc

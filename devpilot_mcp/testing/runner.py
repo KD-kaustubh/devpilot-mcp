@@ -41,9 +41,9 @@ from devpilot_mcp.testing.detection import (
     detect_test_commands,
     select_interpreter,
 )
+from devpilot_mcp.sensitive import REDACTED, SECRET_VALUE_PATTERNS
 from devpilot_mcp.text_search import SKIPPED_DIRS
 from devpilot_mcp.tools import git
-from devpilot_mcp.tools.investigation import _SECRET_VALUE_PATTERNS, REDACTED
 from devpilot_mcp.workspace import PathNotFoundError, Workspace, WorkspaceError
 
 DEFAULT_TIMEOUT_SECONDS = 120
@@ -118,7 +118,7 @@ class Redactor:
             if secret in text:
                 self.count += text.count(secret)
                 text = text.replace(secret, REDACTED)
-        for pattern in _SECRET_VALUE_PATTERNS:
+        for pattern in SECRET_VALUE_PATTERNS:
             text, n = pattern.subn(REDACTED, text)
             self.count += n
         return text

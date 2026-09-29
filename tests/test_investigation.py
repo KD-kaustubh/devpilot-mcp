@@ -301,7 +301,8 @@ class WorkspaceSecurityTests(PlainWorkspaceTestCase):
             result = self.investigate(f"../../secret.txt {self.secret} C:\\Windows\\win.ini /etc/passwd authentication")
         dumped = result.model_dump_json()
         self.assertNotIn("TOP SECRET", dumped)
-        self.assertNotIn(str(self.base), dumped)
+        # `query` echoes the caller's own input (which contains the host path); nothing else may.
+        self.assertNotIn(str(self.base), result.model_copy(update={"query": ""}).model_dump_json())
         for call in read_file.call_args_list:
             self.assertFalse(Path(call.args[1]).is_absolute() or call.args[1].startswith(".."), call.args[1])
         for path in [f.path for f in result.relevant_files] + [s.path for s in result.file_context]:

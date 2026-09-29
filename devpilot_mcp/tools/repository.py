@@ -9,17 +9,16 @@ are grouped under `heuristics` so a client never mistakes them for facts.
 from __future__ import annotations
 
 import json
-import re
 from collections import Counter
 from fnmatch import fnmatchcase
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Any, Literal
 
 from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel
 
-from devpilot_mcp.text_search import SKIPPED_DIRS, NotATextFileError, iter_files, read_text
-from devpilot_mcp.tools.code_search import GENERATED_DIRS
+from devpilot_mcp.manifests import normalize_python_name, pyproject_dependency_names, requirements_txt_names
+from devpilot_mcp.text_search import GENERATED_DIRS, SKIPPED_DIRS, NotATextFileError, iter_files, read_text
 from devpilot_mcp.tools.common import READ_ONLY, as_tool_error
 from devpilot_mcp.workspace import PathNotFoundError, Workspace, WorkspaceError
 
@@ -238,42 +237,6 @@ def _by_depth(paths: list[str]) -> list[str]:
 # --- Manifest inspection -----------------------------------------------------
 
 
-def _normalize_python_name(name: str) -> str:
-    return re.sub(r"[-_.]+", "-", name).lower()
-
-
-def _python_requirement_name(requirement: str) -> str | None:
-    """'Flask[async]>=2.0 ; python_version>"3"' -> 'flask'."""
-    match = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", requirement)
-    return _normalize_python_name(match.group(1)) if match else None
-
-
-def _requirements_txt_names(text: str) -> set[str]:
-    names = set()
-    for line in text.splitlines():
-        line = line.split("#", 1)[0].strip()
-        if line and not line.startswith("-"):  # skip options such as -r, -e, --index-url
-            if name := _python_requirement_name(line):
-                names.add(name)
-    return names
-
-
-def _pyproject_names(data: dict[str, Any]) -> set[str]:
-    project = data.get("project", {})
-    requirements = list(project.get("dependencies", []))
-    for group in project.get("optional-dependencies", {}).values():
-        requirements.extend(group)
-    for group in data.get("dependency-groups", {}).values():
-        requirements.extend(item for item in group if isinstance(item, str))
-    names = {n for r in requirements if isinstance(r, str) and (n := _python_requirement_name(r))}
-
-    poetry = data.get("tool", {}).get("poetry", {})
-    tables = [poetry.get("dependencies", {}), poetry.get("dev-dependencies", {})]
-    tables += [group.get("dependencies", {}) for group in poetry.get("group", {}).values()]
-    names |= {_normalize_python_name(name) for table in tables for name in table}
-    return names
-
-
 def _pyproject_scripts(data: dict[str, Any]) -> list[str]:
     project = data.get("project", {})
     tables = {
@@ -343,10 +306,10 @@ def _inspect_manifest(
 
     if name == "pyproject.toml":
         entry_details = _pyproject_scripts(data)
-        declared(_pyproject_names(data), PYTHON_FRAMEWORKS)
+        declared(pyproject_dependency_names(data), PYTHON_FRAMEWORKS)
     elif name == "Pipfile":
         tables = (data.get("packages", {}), data.get("dev-packages", {}))
-        declared({_normalize_python_name(n) for table in tables for n in table}, PYTHON_FRAMEWORKS)
+        declared({normalize_python_name(n) for table in tables for n in table}, PYTHON_FRAMEWORKS)
     elif name == "Cargo.toml":
         entry_details = [f"[[bin]] {b.get('name', '?')} = {b['path']}" for b in data.get("bin", []) if "path" in b]
         deps = {n for key in ("dependencies", "dev-dependencies") for n in data.get(key, {})}
@@ -361,7 +324,7 @@ def _inspect_manifest(
             if marker in text
         ]
     else:  # requirements*.txt
-        declared(_requirements_txt_names(text), PYTHON_FRAMEWORKS)
+        declared(requirements_txt_names(text), PYTHON_FRAMEWORKS)
 
     return (
         [EntryPointCandidate(file=rel_path, kind="manifest", detail=d) for d in entry_details],

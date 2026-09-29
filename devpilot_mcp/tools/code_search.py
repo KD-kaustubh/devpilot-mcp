@@ -16,7 +16,7 @@ from pathlib import Path
 from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel
 
-from devpilot_mcp.text_search import SKIPPED_DIRS, iter_files, scan_files
+from devpilot_mcp.text_search import GENERATED_DIRS, SKIPPED_DIRS, iter_files, scan_files
 from devpilot_mcp.tools.common import READ_ONLY, as_tool_error
 from devpilot_mcp.workspace import PathNotFoundError, Workspace, WorkspaceError
 
@@ -46,11 +46,6 @@ SOURCE_FILENAMES = frozenset(
 
 # Generated or vendored files that match SOURCE_EXTENSIONS but are just noise.
 EXCLUDED_FILE_PATTERNS = ("*.min.js", "*.min.css", "package-lock.json")
-
-# Build output and tool caches, on top of the VCS/dependency dirs shared with search_files.
-GENERATED_DIRS = frozenset(
-    {"build", "dist", "target", ".next", ".nuxt", "coverage", "htmlcov", ".ruff_cache", ".gradle", ".eggs", "*.egg-info"}
-)
 
 
 class CodeMatch(BaseModel):

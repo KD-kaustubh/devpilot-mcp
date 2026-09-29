@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "devpilot-mcp"
 version = "0.1.0"
-description = "An MCP server that gives AI models safe, read-only access to a software repository."
+description = "An MCP server that gives AI models structured, security-conscious access to a software repository, including controlled patching and test execution."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

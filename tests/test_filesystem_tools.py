@@ -118,5 +118,51 @@ class SearchFilesTests(WorkspaceTestCase):
         self.assertTrue(result.truncated)
 
 
+class SearchFilesPathTests(WorkspaceTestCase):
+    def test_omitted_path_searches_the_whole_workspace(self) -> None:
+        result = filesystem.search_files(self.workspace, "hello")
+        self.assertEqual(result.files_with_matches, ["README.md", "src/app.py"])
+
+    def test_dot_path_is_equivalent_to_omitting_it(self) -> None:
+        for root_alias in (".", ""):
+            with self.subTest(path=root_alias):
+                self.assertEqual(
+                    filesystem.search_files(self.workspace, "hello", root_alias).model_dump(),
+                    filesystem.search_files(self.workspace, "hello").model_dump(),
+                )
+
+    def test_subdirectory_limits_the_scope(self) -> None:
+        result = filesystem.search_files(self.workspace, "hello", "src")
+        self.assertEqual(result.files_with_matches, ["src/app.py"])  # README.md is outside the scope
+        self.assertEqual(result.files_searched, 2)
+        self.assertEqual(filesystem.search_files(self.workspace, "hello", "src\\").files_with_matches, ["src/app.py"])
+
+    def test_single_file_path(self) -> None:
+        result = filesystem.search_files(self.workspace, "TODO", "src/util.py")
+        self.assertEqual([(m.path, m.line_number) for m in result.matches], [("src/util.py", 1)])
+        self.assertEqual(result.files_searched, 1)
+
+    def test_traversal_is_rejected(self) -> None:
+        for attack in ("..", "../", "../secret.txt", "src/../../secret.txt"):
+            with self.subTest(path=attack):
+                with self.assertRaises(PathOutsideWorkspaceError):
+                    filesystem.search_files(self.workspace, "TOP SECRET", attack)
+
+    def test_absolute_drive_and_unc_paths_are_rejected(self) -> None:
+        for attack in (str(self.secret), "/etc/passwd", "C:\\Windows", "D:/other-project", "\\\\server\\share\\x"):
+            with self.subTest(path=attack):
+                with self.assertRaises(PathOutsideWorkspaceError):
+                    filesystem.search_files(self.workspace, "TOP SECRET", attack)
+
+    def test_nonexistent_path(self) -> None:
+        with self.assertRaisesRegex(PathNotFoundError, "Search path not found"):
+            filesystem.search_files(self.workspace, "hello", "does/not/exist")
+
+    def test_explicit_dependency_directory_can_be_searched(self) -> None:
+        # Like search_code, the skip list only prunes sub-directories below the search path.
+        result = filesystem.search_files(self.workspace, "hello", "node_modules")
+        self.assertEqual(result.files_with_matches, ["node_modules/dep.js"])
+
+
 if __name__ == "__main__":
     unittest.main()

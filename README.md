@@ -1,51 +1,432 @@
 # DevPilot MCP
 
-DevPilot MCP is a [Model Context Protocol](https://modelcontextprotocol.io) server that lets an AI model explore and understand a software repository.
+DevPilot MCP is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives an AI model structured, security-conscious access to one software repository. Its 18 tools read and search files, describe the repository's structure, report Git and GitHub facts, gather evidence for developer questions, apply an explicit patch **written by the caller** (and revert it), and run the repository's Python tests through two fixed commands. DevPilot collects evidence and carries out tightly bounded actions; the connected AI model does the reasoning.
 
-It is being built in phases:
+## What It Does
 
-- **Phase 1: read-only filesystem access.** List, read and search files.
-- **Phase 2: code search.** `search_code` searches source files only and can be limited to a subdirectory or file.
-- **Phase 3: repository understanding.** `analyze_repository` returns a deterministic, factual overview of the repository.
-- **Phase 4: Git intelligence.** `git_status`, `git_log`, `git_diff` and `git_branch` give read-only, structured Git information.
-- **Phase 5: GitHub integration.** `github_repository`, `github_issues` and `github_pull_requests` read objective GitHub facts for the repository behind the workspace's `origin` remote.
-- **Phase 6: developer investigation.** `investigate_repository(query)` gathers ranked, bounded evidence for a developer question: relevant files, matching lines, source excerpts, and Git and GitHub context. The consuming AI then reasons over that evidence.
-- **Phase 7: controlled code modification.** `apply_patch` applies an explicit unified diff **supplied by the caller**, validated in full and applied atomically, and `revert_patch` undoes it by `change_id`. DevPilot never generates or chooses changes itself.
-- **Phase 8 (this release): testing and validation.** `get_test_commands` detects the repository's test framework without running anything, `run_tests` runs one of two fixed test commands, and `validate_repository` reports objective checks. **Arbitrary shell commands are not supported.**
+```
+User
+  │
+  ▼
+AI model (e.g. Gemini)
+  │
+  ▼
+MCP client
+  │  stdio
+  ▼
+DevPilot MCP server
+  ├── Filesystem intelligence    list_directory, read_file, search_files
+  ├── Code search                search_code
+  ├── Repository understanding   analyze_repository
+  ├── Git intelligence           git_status, git_log, git_diff, git_branch
+  ├── GitHub intelligence        github_repository, github_issues, github_pull_requests
+  ├── Developer investigation    investigate_repository
+  ├── Controlled patching        apply_patch, revert_patch
+  └── Testing & validation       get_test_commands, run_tests, validate_repository
+  │
+  ▼
+Repository (one configured workspace directory)
+```
 
-The server never touches anything outside one configured workspace directory.
+The server never touches anything outside that workspace directory. Every tool returns **structured output**, and its JSON schema is published to the client. Results are bounded, and anything cut short is reported (`truncated`, `truncated_fields`, `warnings`). An expected failure, such as a missing file or a rejected path, comes back as a tool error (`isError: true`) with a clear message instead of crashing the server.
 
-## Tools
+## Why This Project
 
-| Tool | Input | Returns |
-|------|-------|---------|
-| `list_directory` | `path` (default `"."`; `""` also means the workspace root) | The directory's entries (`name`, `path`, `type`, `size_bytes`), directories first. Capped at 500 entries, with a `truncated` flag. |
-| `read_file` | `path` | `content`, `size_bytes`, `line_count`. Rejects binary files, non-UTF-8 files and files over 1 MB. |
-| `search_files` | `query` | Case-insensitive substring matches (`path`, `line_number`, `line`), plus `files_with_matches` and `files_searched`. Skips binary files, files over 1 MB and dependency/VCS folders (`.git`, `node_modules`, `.venv`, …). Capped at 100 matches. |
-| `search_code` | `query`, optional `path` (default `"."`; a directory or a single source file) | `matches` as `{file, line, text}`, plus `path`, `case_sensitive`, `files_searched`, `files_skipped` and `truncated`. See [Code search](#code-search). |
-| `analyze_repository` | none | Language counts, top directories, documentation, configuration, dependency manifests, lock files and tests. Possible entry points and framework indicators are kept separately under `heuristics`. See [Repository analysis](#repository-analysis). |
-| `git_status` | none | Branch, HEAD commit, upstream and ahead/behind counts, `clean`, and sorted `staged`, `unstaged`, `untracked`, `deleted` and `conflicted` lists. See [Git tools](#git-tools). |
-| `git_log` | `limit` (1–50, default 10) | Recent commits, newest first: hashes, author, date, parents, subject and body, plus `has_more`. |
-| `git_diff` | `staged` (default `false`), `path` (default `"."`) | Changed files with change type and line counts, plus unified diff text capped at 60,000 bytes (`truncated`, `warnings`). |
-| `git_branch` | none | The current branch (`detached` flag) and the local branches with short commit and upstream. |
-| `github_repository` | none | GitHub metadata for the `origin` repository: description, default branch, visibility, flags, timestamps, language, license, topics and counts. See [GitHub tools](#github-tools). |
-| `github_issues` | `state` (`open`/`closed`/`all`, default `open`), `limit` (1–50, default 10) | Issues only (pull requests excluded and counted), newest first: number, title, state, author, labels, assignees, comment count, timestamps and URL. `has_more`. |
-| `investigate_repository` | `query` (1–500 characters) | Structured **evidence** for a developer question, not an answer: search terms, repository facts, ranked relevant files and directories with reasons, matching lines, source excerpts, and Git and GitHub context. See [Developer investigation](#developer-investigation). |
-| `apply_patch` ✏️ | `patch`: a unified diff, up to 256 KB | **Writes files.** Validates the whole caller-supplied patch, then applies it atomically. Returns a `change_id`, the patch SHA-256, and per-file change type, line counts and SHA-256 before/after. See [Controlled code modification](#controlled-code-modification). |
-| `revert_patch` ✏️ | `change_id` from `apply_patch` | **Writes files.** Restores the exact previous bytes of every file in that change, or refuses if any of them changed since. |
-| `get_test_commands` | none | The detected test frameworks (pytest, unittest), each with its fixed command, confidence and evidence, plus `primary`. **Runs nothing.** See [Testing and validation](#testing-and-validation). |
-| `run_tests` ▶️ | optional `framework` (`pytest`/`unittest`, must have been detected), `timeout_seconds` (1–600, default 120) | **Executes repository test code** with the detected fixed command. Returns status, exit code, parsed counts, bounded stdout/stderr and the files the run changed. |
-| `validate_repository` ▶️ | `run_tests` (default `false`), `timeout_seconds` | A deterministic report of facts, checks, warnings, failures and skipped checks: repository analysis, Git state, test discovery, optional test execution and Python syntax. |
-| `github_pull_requests` | `state` (`open`/`closed`/`all`, default `open`), `limit` (1–50, default 10) | Pull requests, newest first: number, title, state, draft, author, timestamps including `merged_at`, source and target branch and repository, labels, assignees, requested reviewers and teams, and URL. `has_more`. |
+An AI assistant working on a codebase needs two things: accurate context about the repository, and a small set of actions whose effects are explicit and checkable. DevPilot follows an **evidence-first, controlled-action** model:
 
-Every tool returns **structured output**, and its JSON schema is published to the client. Every tool is marked `readOnlyHint: true` except four:
+- **Evidence first.** Most tools only read. They return objective facts (files, matches, manifests, Git state, GitHub metadata) and never answer the question or call an LLM. `investigate_repository` ranks evidence for a question and leaves the interpretation to the model.
+- **Controlled actions.** There are only two kinds of action. `apply_patch` applies exactly the unified diff the caller supplies, atomically, and `revert_patch` undoes it. `run_tests` runs one of two fixed Python test commands, chosen from repository evidence. DevPilot never generates code, commits, pushes or runs a caller-supplied command.
+- **Explicit boundaries.** Every path goes through one workspace check, every process starts at one of two allowlisted launch points, and every GitHub request goes through one fixed-endpoint client.
 
-- the Phase 7 write tools `apply_patch` and `revert_patch`;
-- the Phase 8 tools `run_tests` and `validate_repository`, which can execute the repository's test code.
+## Key Features
 
-These four are marked `readOnlyHint: false` and `destructiveHint: true`. An expected failure, such as a missing file or a rejected path, comes back as a tool error (`isError: true`) with a clear message instead of crashing the server.
+- **Filesystem intelligence:** list, read and search text files, optionally scoped to a directory, with binary, size and dependency-folder handling.
+- **Code search:** source-only, smart-case search that can be scoped to a directory or a single file.
+- **Repository understanding:** languages, directories, documentation, configuration, dependency manifests, lock files and tests, with possible entry points and framework indicators kept apart as heuristics.
+- **Git intelligence:** status, log, diff and branches through an allowlisted, read-only Git boundary.
+- **GitHub intelligence:** repository metadata, issues and pull requests for the `origin` repository, over HTTPS GET to `api.github.com` only. `GITHUB_TOKEN` is optional.
+- **Developer investigation:** deterministic, ranked evidence for a developer question: files with reasons, matching lines, excerpts, and Git and GitHub context.
+- **Controlled patching:** strict unified-diff validation, protected files, atomic apply with rollback, and hash-checked revert.
+- **Testing and validation:** framework detection that runs nothing, fixed-command test runs with a sanitized environment, a timeout, bounded output and side-effect reporting, and a validation report that executes no code by default.
 
-## Code search
+## Security Model
+
+DevPilot limits what an MCP client can reach and do. It is **not a sandbox**: the gaps are listed under [Known Limitations](#known-limitations).
+
+### Workspace boundary
+
+All paths are relative to the workspace root. `Workspace.resolve()` in `devpilot_mcp/workspace.py` is the only way a tool turns a path into a filesystem location. It:
+
+1. rejects null bytes, absolute paths (`/etc/passwd`), drive-letter paths (`C:\Users\…`, `D:\other-project\…`, `c:foo`) and UNC paths (`\\server\share`);
+2. joins the path to the root and calls `resolve()`, which collapses `..` and follows symlinks;
+3. checks that the result is still inside the root. If it isn't, the request is rejected (`../../secret.txt` fails here).
+
+A symlink inside the workspace that points outside it is hidden from `list_directory`, skipped by `search_files`, `search_code` and `analyze_repository`, and rejected by `read_file`. `analyze_repository` takes no path at all. It always analyzes the workspace root, and any extra arguments are dropped. Error messages never include absolute host paths.
+
+### Symlink and junction protection
+
+- **Reads:** a symlink that leads outside the workspace is hidden, skipped or rejected, as described above. Symlinks are not followed when walking directories.
+- **Writes:** a patch target may not contain a symlink or junction **anywhere on its path**, even one that points back inside the workspace, and the final path must resolve to its literal location. See [Validation pipeline](#validation-pipeline).
+
+### Read-only, write and execute tools
+
+Every tool carries one of three MCP annotation profiles, all defined in `devpilot_mcp/tools/common.py`:
+
+| Profile | Tools | `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` |
+|---------|-------|----------------|-------------------|------------------|-----------------|
+| Read-only | the other 14 tools | true | false | true | false |
+| Writes files | `apply_patch`, `revert_patch` | false | true | false | false |
+| Executes code | `run_tests`, `validate_repository` | false | true | false | true |
+
+**`openWorldHint` means one thing here:** the tool may cause interactions or effects whose external targets DevPilot does not bound. That is true only of the two tools that can run the repository's test code, because test code can reach anything. All network access DevPilot performs itself goes to one fixed host (`api.github.com`, HTTPS, GET only, three endpoints), so the GitHub tools and `investigate_repository` are `openWorldHint: false`. `validate_repository` runs tests only when `run_tests` is true, but it carries the execute profile because annotations describe what a tool can do. A test pins every tool's profile.
+
+### Execution boundaries
+
+- **Exactly two subprocess launch points:** `_execute` in `devpilot_mcp/tools/git.py` (Git) and `run_process` in `devpilot_mcp/testing/runner.py` (tests). Both take an argument list, use `shell=False` and closed stdin, and enforce a timeout and an output cap.
+- **Git command allowlist:** only fixed read-only forms of `status`, `log`, `diff`, `diff-files`, `branch`, `rev-parse` and `remote get-url` can run, with the fsmonitor hook, external diff drivers, textconv filters, the pager and network protocols disabled. See [Read-only execution boundary](#read-only-execution-boundary).
+- **No arbitrary shell executor.** No tool accepts a command, executable, argument list or shell string. The only test commands are `python -m pytest -p no:cacheprovider` and `python -m unittest` (optionally `discover -s <dir>`), launched by absolute interpreter path. See [Security restrictions](#security-restrictions).
+
+### Controlled patching
+
+- **Strict parser:** only standard unified diffs are accepted. Binary patches, renames, mode changes, quoted paths and anything that is not part of a diff are rejected, and hunks must match exactly at their stated lines.
+- **Atomic apply and rollback:** every file is validated and staged first, then swapped in with `os.replace`. Any failure rolls back every completed step, so a patch applies completely or not at all.
+- **Protected files:** `.git` contents, `.env` files (except `.env.example`), private keys and credential files can never be written.
+- **Safe revert:** a revert is refused, touching nothing, if any file changed since the patch was applied.
+
+See [Controlled code modification](#controlled-code-modification).
+
+### Secrets and environment
+
+- **GitHub token:** `GITHUB_TOKEN` is read at request time and placed only in the `Authorization` header. It is never returned, logged or included in error text.
+- **Secret files:** likely secret files (`.env*`, keys, credentials) are never used as investigation evidence and can never be patched.
+- **Test environment:** interpreter and pytest injection variables, every `GIT_*` variable and every variable whose name looks secret are removed before tests run, so test code cannot read `GITHUB_TOKEN`. This is a name-based blocklist, not a sandbox.
+- **Output redaction (best-effort, not guaranteed):** test output and investigation evidence are scanned for known secret patterns and the values of removed variables, which are replaced with `[REDACTED]`. Secrets in other forms can still appear.
+
+### GitHub access
+
+- HTTPS to `api.github.com` only, GET only, three fixed endpoints. Tools cannot supply a URL, host, path, method or header.
+- **Redirects are never followed**, so the `Authorization` header cannot reach another host.
+- See [Read-only HTTP boundary](#read-only-http-boundary).
+
+### Bounded operations
+
+Every Git and test process has a timeout and an output cap, every HTTP request has a 15-second timeout and a response-size cap, and every list, scan, excerpt and diff has a documented limit. Limits are constants at the top of each module.
+
+### What is not protected
+
+- Test code run by `run_tests` runs with the permissions of the DevPilot process. It can read and write files and use the network; there is **no network or filesystem isolation**.
+- Secret redaction and environment sanitization are **best-effort**; they do not guarantee that no secret reaches a client.
+- Clean/smudge filter drivers configured in a repository's own `.git/config` cannot be disabled generically.
+
+The full list is under [Known Limitations](#known-limitations).
+
+## MCP Tool Catalogue
+
+| Tool | Purpose | Access | External / Execution |
+|------|---------|--------|----------------------|
+| `list_directory` | List a directory's entries (`path`, default `"."`) | Read-only | None |
+| `read_file` | Read a UTF-8 text file up to 1 MB (`path`) | Read-only | None |
+| `search_files` | Case-insensitive text search in all text files (`query`, optional `path`, default `"."`) | Read-only | None |
+| `search_code` | Smart-case search in source files only (`query`, optional `path`) | Read-only | None |
+| `analyze_repository` | Factual repository overview: languages, directories, manifests, tests, heuristics (no inputs) | Read-only | None |
+| `git_status` | Branch, HEAD, upstream, and staged, unstaged and untracked files (no inputs) | Read-only | Allowlisted `git` |
+| `git_log` | Recent commits, newest first (`limit` 1–50) | Read-only | Allowlisted `git` |
+| `git_diff` | Unstaged or staged changes with line counts and bounded diff text (`staged`, `path`) | Read-only | Allowlisted `git` |
+| `git_branch` | Current branch and local branches (no inputs) | Read-only | Allowlisted `git` |
+| `github_repository` | GitHub metadata for the `origin` repository (no inputs) | Read-only | `git remote get-url`; HTTPS GET to `api.github.com` |
+| `github_issues` | Issues, pull requests excluded (`state`, `limit` 1–50) | Read-only | `git remote get-url`; HTTPS GET to `api.github.com` |
+| `github_pull_requests` | Pull requests with branches and reviewers (`state`, `limit` 1–50) | Read-only | `git remote get-url`; HTTPS GET to `api.github.com` |
+| `investigate_repository` | Ranked evidence for a developer question, not an answer (`query`, 1–500 characters) | Read-only | Allowlisted `git`; HTTPS GET to `api.github.com` (best effort) |
+| `apply_patch` | Validate and atomically apply a caller-supplied unified diff (`patch`, up to 256 KB) | **Writes files** | None; no commands run |
+| `revert_patch` | Restore the files of an earlier `apply_patch` (`change_id`) | **Writes files** | None; no commands run |
+| `get_test_commands` | Detect pytest/unittest and the fixed command DevPilot would use (no inputs) | Read-only | None; runs nothing |
+| `run_tests` | Run the detected fixed test command (`framework`, `timeout_seconds` 1–600) | **Executes code** | Runs repository test code; allowlisted `git status` for side-effect checks |
+| `validate_repository` | Validation report: analysis, Git state, test discovery, syntax, optional test run (`run_tests`, `timeout_seconds`) | **Executes code** (only when `run_tests` is true) | Allowlisted `git`; runs test code only on request |
+
+Every input is validated before anything runs; extra MCP arguments are dropped. Detailed behaviour, output examples and limits for each tool are in [Tool Reference](#tool-reference).
+
+## Quick Start
+
+Requires **Python 3.10+** (3.11+ recommended: TOML manifests are only parsed on 3.11+) and **Git** on `PATH` for the Git and GitHub tools. From a terminal:
+
+```powershell
+git clone https://github.com/KD-kaustubh/devpilot-mcp.git
+cd devpilot-mcp
+python -m venv .venv
+.venv\Scripts\activate           # macOS/Linux: source .venv/bin/activate
+pip install -e .
+copy .env.example .env           # macOS/Linux: cp .env.example .env
+```
+
+### Configuration
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `GITHUB_TOKEN` | *(unset)* | Optional fine-grained token with read-only Metadata, Issues and Pull requests permissions, for private repositories or a higher rate limit. Keep it in `.env` (git-ignored) or the environment; never commit it. |
+| `DEVPILOT_TEST_PYTHON` | *(unset)* | Optional **absolute** path to the Python interpreter `run_tests` uses, e.g. a project's own venv `python.exe`. Default: the interpreter running DevPilot. Set only by the server operator; no tool argument can change it. |
+| `DEVPILOT_WORKSPACE` | `./workspace` | The directory the tools can access. A relative path is resolved against the **project root**, not the current directory, so the server behaves the same whichever directory a client launches it from. |
+
+If the directory doesn't exist, the server exits at startup with an error on stderr.
+
+### Choosing the workspace
+
+- The default `./workspace` contains a small `sample_project` to explore with the file, search and analysis tools. It is a plain folder, so the Git and GitHub tools report *"The workspace is not a Git repository"* there.
+- To use every tool, set `DEVPILOT_WORKSPACE` to the **root** of a Git repository, for example this project's own directory. The GitHub tools also need an `origin` remote on github.com.
+- Point `apply_patch` at a disposable copy of a repository while experimenting, and use `run_tests` only on repositories whose test code you are willing to execute.
+
+### Starting the server
+
+The server uses the stdio transport, so an MCP client normally starts it. To start it by hand:
+
+```powershell
+devpilot-mcp
+# or
+python -m devpilot_mcp
+```
+
+It then waits silently for MCP messages on stdin. Press Ctrl+C to stop it.
+
+## MCP Inspector
+
+Requires Node.js. Run these commands from the project root with the virtual environment activated.
+
+> **Each separate Inspector CLI invocation starts a new DevPilot server process.** The `revert_patch` registry lives in that process's memory, so a `change_id` returned by one CLI call cannot be reverted by another. Use the web UI, which keeps one server session, to apply and revert.
+
+### Inspector web UI
+
+```powershell
+npx @modelcontextprotocol/inspector
+```
+
+In the page that opens:
+
+1. Set **Transport Type** to `STDIO`.
+2. Set **Command** to the full path of `.venv\Scripts\devpilot-mcp.exe`. On macOS/Linux use `.venv/bin/devpilot-mcp`. Leave **Arguments** empty.
+3. Optionally, add `DEVPILOT_WORKSPACE` under **Environment Variables** to point the server at a different directory.
+4. Click **Connect**, open the **Tools** tab, then click **List Tools**. The eighteen tools should appear.
+5. Try these calls:
+   - `list_directory` with `path` = `sample_project`
+   - `read_file` with `path` = `sample_project/src/inventory.py`
+   - `search_files` with `query` = `TODO`, then again with `path` = `sample_project/src` to limit the search to that folder. `path` = `../..` is rejected.
+   - `search_code` with `query` = `format_price`. Expect 3 matches in `src/inventory.py` and `src/utils.py`.
+   - `search_code` with `query` = `def` and `path` = `sample_project/src`. The search is limited to that folder.
+   - `search_code` with `query` = `Inventory`. The search is case-sensitive, so the lowercase variable `inventory` doesn't match.
+   - `search_code` with `query` = `no_such_symbol`. Expect an empty `matches` list.
+   - `search_code` with `query` = `x` and `path` = `../../secret`. The call should be rejected.
+   - `read_file` with `path` = `../../secret.txt`. The call should be rejected with *"Path escapes the workspace root"*.
+   - `git_status`, `git_log`, `git_diff` and `git_branch`. Against the default `./workspace` these return *"The workspace is not a Git repository"*, because `./workspace` is a plain folder. Set `DEVPILOT_WORKSPACE` to a repository root, e.g. this project's directory, and reconnect. Then try `git_log` with `limit` = `3`, and `git_diff` with and without `staged` = `true` after editing or staging a file.
+   - `investigate_repository` with `query` = `Where is GitHub integration implemented?`. The result is evidence (ranked files with reasons, matching lines, excerpts, Git and GitHub context), not an answer. Try also `How is this project structured?`, `How are MCP tools registered?` and `How is workspace security implemented?`. A whitespace-only query is rejected.
+   - `apply_patch`, **against a disposable copy of a repository**. Paste a small unified diff, apply it, and check the file with `read_file` and `git_status`. Then call `revert_patch` with the returned `change_id` in the same session, and confirm the original content is back. Also try a stale patch (apply the same one twice) and a patch for `.env`; both are rejected and nothing changes.
+   - `get_test_commands`. Nothing is run. Then `validate_repository` with the defaults: `test_execution` is `skipped`. Then, **against a repository whose tests you are willing to execute**, `run_tests` with `timeout_seconds` = `60`, and `validate_repository` with `run_tests` = `true`. Try `framework` = `; whoami`; the call is rejected.
+   - `github_repository`, `github_issues` with `limit` = `5`, and `github_pull_requests` with `limit` = `5`. Like the Git tools, these need `DEVPILOT_WORKSPACE` to be a repository root whose `origin` points to github.com, e.g. this project's directory. A repository with no issues or pull requests returns empty lists. Also try `state` = `merged` or `limit` = `51`; both are rejected.
+   - `analyze_repository` with no arguments. Against the sample project, expect 4 files (`Python: 3`, `Markdown: 1`), the test directory `sample_project/tests` and empty `heuristics`, because the sample has no manifests. To analyze a real repository, set `DEVPILOT_WORKSPACE` in step 3 to that repository's path and reconnect.
+
+### Inspector CLI (scriptable)
+
+```powershell
+npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe --method tools/list
+npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe --method tools/call --tool-name search_files --tool-arg query=TODO
+npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe --method tools/call --tool-name search_files --tool-arg query=TODO path=sample_project/src
+npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe --method tools/call --tool-name search_code --tool-arg query=class
+npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe --method tools/call --tool-name search_code --tool-arg query=def path=sample_project/src
+npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe --method tools/call --tool-name read_file --tool-arg path=../../secret.txt
+npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe --method tools/call --tool-name analyze_repository
+npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/other-repo --method tools/call --tool-name analyze_repository
+npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-git-repo --method tools/call --tool-name git_status
+npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-git-repo --method tools/call --tool-name git_log --tool-arg limit=3
+npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-git-repo --method tools/call --tool-name git_diff --tool-arg staged=true
+npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-github-clone --method tools/call --tool-name github_repository
+npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-github-clone --method tools/call --tool-name github_issues --tool-arg state=all limit=5
+npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-github-clone --method tools/call --tool-name github_pull_requests --tool-arg limit=5
+npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-repo --method tools/call --tool-name investigate_repository --tool-arg "query=How is authentication implemented?"
+npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-disposable-copy --method tools/call --tool-name apply_patch --tool-arg "patch=\"--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-# Old title\n+# New title\n\""
+npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-repo --method tools/call --tool-name get_test_commands
+npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-repo --method tools/call --tool-name run_tests --tool-arg timeout_seconds=60
+npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-repo --method tools/call --tool-name validate_repository --tool-arg run_tests=true
+```
+
+The Inspector CLI mangles raw multi-line values, so pass a patch as a **JSON-encoded string** (with `\n` escapes), as above. Each Inspector CLI call starts a new server process with an empty patch registry, so `revert_patch` from a separate CLI call finds no change. Use the web UI, or any client that keeps one session, to apply and revert.
+
+Launch the server through the `devpilot-mcp` executable rather than `python -m devpilot_mcp`. The Inspector CLI parses flags such as `-m` and `-e` itself, so they never reach the server.
+
+## Gemini / MCP Client Usage
+
+DevPilot is a standard MCP server on the **stdio** transport. An MCP client, the component that connects an AI model such as Gemini to MCP servers, starts DevPilot as a local process and talks to it over stdin/stdout. DevPilot itself never calls a model.
+
+To register DevPilot with a client that can launch local stdio servers, give it:
+
+| Setting | Value |
+|---------|-------|
+| Command | the absolute path of `.venv\Scripts\devpilot-mcp.exe` (macOS/Linux: `.venv/bin/devpilot-mcp`) |
+| Arguments | none |
+| Environment | `DEVPILOT_WORKSPACE` (the repository to expose), and optionally `GITHUB_TOKEN` and `DEVPILOT_TEST_PYTHON`. Values in the project's `.env` are used when the client does not set them. |
+
+Where these values go depends on the client; consult its documentation for the configuration format. No client-specific configuration files are shipped. DevPilot has been exercised through MCP Inspector (web UI and CLI), over stdio, and through the MCP Python SDK client in the test suite.
+
+Once connected, the client lists the 18 tools with their descriptions, input and output schemas and annotations. A client that honours annotations can ask for confirmation before the **Writes files** and **Executes code** tools run. As with the Inspector, the `revert_patch` registry lives in the server process, so a client must keep one server session to revert a change.
+
+## Developer Workflows
+
+These are typical tool sequences. The AI model (or a person) chooses each call and interprets the results; DevPilot never chains tools or makes changes on its own.
+
+### 1. Understand an unfamiliar repository
+
+1. `analyze_repository`: languages, top directories, manifests, tests, possible entry points and frameworks.
+2. `list_directory` and `read_file` on the entry points and documentation it lists.
+3. `search_code` for key names, e.g. `query="register"` with `path="src"`.
+4. `git_log` and `git_status` for recent activity and uncommitted work.
+
+### 2. Investigate an issue
+
+1. `github_issues` (or `github_pull_requests`) to see what has been reported.
+2. `investigate_repository` with a concrete question, e.g. *"Where is CSV export implemented?"*. It returns ranked files with reasons, matching lines, excerpts and related commits, issues and pull requests.
+3. `read_file` and `search_code` on the top-ranked files; `git_diff` if relevant files have uncommitted changes.
+4. The model explains the cause from that evidence.
+
+### 3. Apply and revert an explicit patch
+
+1. Read the target files with `read_file`, so the diff is written against the current content.
+2. The model or the person writes a unified diff. DevPilot does not write or alter it.
+3. `apply_patch` validates the whole diff and applies it atomically, returning a `change_id`.
+4. Check the result with `read_file`, `git_diff` and, if wanted, `run_tests`.
+5. If the change is not wanted, `revert_patch(change_id)` in the same server session restores the exact previous bytes. Nothing is committed; the change stays in the working tree for the user to review.
+
+### 4. Validate a repository
+
+1. `get_test_commands`: which framework was detected and the fixed command, without running anything.
+2. `validate_repository()`: repository facts, Git state, test discovery and Python syntax. No code is executed.
+3. Only for a repository whose tests you are willing to run: `validate_repository(run_tests=true)` or `run_tests`, then review `failures`, `warnings` and `side_effects`.
+
+## Known Limitations
+
+DevPilot limits what a client can reach, but it is not a sandbox. These are the known gaps, in one place.
+
+### Execution and isolation
+
+- **Python-only test execution.** Only pytest and unittest are supported. No tox, nox, make or package-manager scripts are run, even when configured.
+- **Not network-isolated.** Test code run by `run_tests` (or `validate_repository` with `run_tests=true`), including `conftest.py` and the repository's pytest configuration, runs with the permissions of the DevPilot process. It can read and write files and use the network. There is no sandbox, network isolation or filesystem isolation beyond the sanitized environment.
+- **Environment sanitization is blocklist-based, not a sandbox.** Variables are removed by name: interpreter and pytest injection variables, `GIT_*`, and names that look secret (`*TOKEN*`, `*SECRET*`, `*PASSWORD*`, …). A secret in a variable with an unremarkable name is still passed to test code.
+- **Secret redaction is best-effort, not guaranteed.** Test output and investigation evidence are scanned for GitHub tokens, AWS access key IDs, private-key headers, the configured `GITHUB_TOKEN` and, for test output, the values of removed variables. Secrets in any other form can appear in output.
+- **Timeouts kill one process.** On timeout, only the launched test process is killed. Processes the tests started themselves may outlive it.
+- **Side-effect detection is bounded.** It compares file sizes and modification times, not content hashes, skips `.git`, dependency and cache folders, and covers up to 20,000 files. Changes are reported, never reverted, and there is no content sandboxing.
+- **Interpreter and dependencies.** Tests run with DevPilot's own interpreter unless `DEVPILOT_TEST_PYTHON` is set. A project whose dependencies (including pytest) are not installed there reports `status: "error"` with a warning.
+- **Counts come from summary text.** Heavily customised pytest output can leave counts `null`.
+- **Syntax is checked with DevPilot's Python grammar**, so code for a newer Python may be reported as a syntax error.
+- **Git filter drivers.** Clean/smudge filter drivers configured in the repository's own `.git/config` cannot be disabled generically. Only run the Git tools on repositories whose `.git/config` you trust.
+
+### Patching
+
+- **The registry lives in memory, for the lifetime of the server process.** A restart, or a new server process, forgets every `change_id`. MCP Inspector's CLI mode starts a new server for each call, so to revert across processes, apply an explicit reverse patch. The web UI and normal MCP clients keep one session.
+- **Exact hunks, not every diff form.** Hunks must match at their stated lines, so patches with wrong line numbers or counts are rejected, not guessed at. Renames (use a deletion plus a creation), mode changes, binary files, non-UTF-8 files, empty-file creation, quoted paths and patches in any other format are not supported.
+- **Revert checks hashes, not stored copies.** To keep memory bounded, the post-apply state is verified by SHA-256 and size rather than a stored copy of the new bytes. The original bytes needed for restoring are always stored.
+- **One server at a time.** Applies and reverts are serialized within one server. Two DevPilot servers editing the same workspace do not coordinate, although stale-patch and revert checks still refuse to overwrite changes they did not make.
+
+### GitHub integration
+
+- **github.com only.** GitHub Enterprise Server hosts are rejected.
+- **Only the `origin` remote is used.** For a fork you work on, `origin` is usually the fork.
+- **Bounded results.** Pages beyond the ones described above are not reachable, so only the most recent items up to `limit` are returned.
+- **Issues in pull-request-heavy repositories.** With only 3 pages scanned, `github_issues` can return fewer than `limit` issues, with `has_more: true`.
+- **Proxies.** HTTPS proxies set through the standard `HTTPS_PROXY` environment variable are used, as with any `urllib` client.
+
+### Investigation
+
+- **Keyword heuristic, not understanding.** Synonyms outside the small table, typos and conceptual questions ("why is it slow?") are not bridged. Ask with concrete names for better evidence.
+- **Substring matching** can over-match short terms, e.g. `auth` in `author`. Ranking by rarity reduces, but does not remove, this noise.
+- **Self-reference.** When investigating DevPilot itself, `tools/investigation.py` matches many queries, because it contains the heuristic's own vocabulary and example queries.
+- **Scan budget.** In very large repositories the 2,000-line scan budget can run out; `truncated_fields` then includes `search_scan`.
+- **Recent items only.** Only the newest 30 open GitHub issues and PRs, and the last 50 commits, are checked for relevance.
+
+### Platform
+
+- **Python 3.10.** TOML manifests are listed with a warning but not parsed, because `tomllib` needs Python 3.11+. The test suite exercises TOML parsing, so CI runs on Python 3.11 and 3.12.
+- **Windows symlinks.** On Windows, the symlink-escape tests are skipped unless Developer Mode is on.
+
+## Architecture
+
+```
+MCP client ──stdio──► server.py            builds the MCPServer and registers each tool group
+                          │
+                          ▼
+                      tools/               MCP tool definitions, schemas, annotation profiles, error mapping
+                          │
+      ┌──────────────┬────┴─────────┬──────────────┬──────────────┐
+      ▼              ▼              ▼              ▼              ▼
+ text_search.py   github/        patching/      testing/       tools/git.py
+ manifests.py     remote.py      unified_diff   detection      Git boundary
+ sensitive.py     client.py      changes        runner         (subprocess)
+                  (HTTPS GET)                   (subprocess)
+      └──────────────┴──────────────┴──────┬───────┴──────────────┘
+                                           ▼
+                                     workspace.py          Workspace.resolve: the path boundary
+```
+
+- **Three boundaries:** all paths go through `workspace.py`, all processes start in `tools/git.py` or `testing/runner.py`, and all network access goes through `github/client.py`.
+- **Shared leaf modules** (`text_search.py`, `manifests.py`, `sensitive.py`) import nothing else from DevPilot, so every layer can use them without cycles.
+- **Lower layers use only public functions of tools/:** `github/remote.py` reads the origin URL through `tools.git.read_remote_url`, and `testing/` reuses `tools.git.git_status` and `tools.repository.analyze_repository`. This keeps every Git call inside the one Git boundary.
+
+### Package structure
+
+```
+DevPilot-MCP/
+├── devpilot_mcp/
+│   ├── __main__.py        # enables `python -m devpilot_mcp`
+│   ├── server.py          # builds the MCPServer, registers tool groups, stdio entry point
+│   ├── config.py          # loads DEVPILOT_WORKSPACE from the environment / .env
+│   ├── workspace.py       # path sandboxing (the security boundary)
+│   ├── text_search.py     # shared file walking, text detection, line matching and skipped directories
+│   ├── manifests.py       # shared Python dependency-manifest parsing (requirements*.txt, pyproject.toml)
+│   ├── sensitive.py       # shared secret-file and secret-value patterns
+│   ├── testing/
+│   │   ├── detection.py   # test-framework detection and the fixed commands (nothing executed)
+│   │   ├── runner.py      # the controlled, shell-free, bounded test execution
+│   │   └── syntax.py      # Python syntax validation by parsing only
+│   ├── patching/
+│   │   ├── unified_diff.py # strict unified-diff parser and in-memory hunk application
+│   │   └── changes.py     # validation, atomic commit/rollback, change registry, revert
+│   ├── github/
+│   │   ├── remote.py      # discovers owner/repo from the origin remote
+│   │   └── client.py      # read-only GitHub REST client (the only code that calls GitHub)
+│   └── tools/
+│       ├── common.py      # the three annotation profiles and error mapping
+│       ├── filesystem.py  # list_directory, read_file, search_files
+│       ├── code_search.py # search_code
+│       ├── repository.py  # analyze_repository
+│       ├── git.py         # git_status, git_log, git_diff, git_branch (the Git execution boundary)
+│       ├── github.py      # github_repository, github_issues, github_pull_requests
+│       ├── investigation.py # investigate_repository
+│       ├── patch.py       # apply_patch, revert_patch (the only write tools)
+│       └── testing.py     # get_test_commands, run_tests, validate_repository
+├── tests/                 # unittest suite (sandboxing, tool logic, in-process MCP client)
+├── workspace/
+│   └── sample_project/    # small demo repo to explore with the tools
+├── .github/workflows/test.yml # CI: runs the unittest suite
+├── .env.example
+├── LICENSE
+└── pyproject.toml
+```
+
+To add a tool group, create a new module in `devpilot_mcp/tools/` with a `register(server, workspace)` function, pick one of the annotation profiles in `tools/common.py`, then call it from `create_server()` in `server.py`.
+
+## Tool Reference
+
+Detailed behaviour, output examples and limits for each tool group.
+
+### Filesystem tools
+
+- **`list_directory(path=".")`**: the directory's entries (`name`, `path`, `type`, `size_bytes`), directories first. `""` also means the workspace root. Capped at 500 entries, with a `truncated` flag and `total_entries`.
+- **`read_file(path)`**: `content`, `size_bytes` and `line_count`. Binary files, non-UTF-8 files and files over 1 MB are rejected.
+- **`search_files(query, path=".")`**: case-insensitive substring matches (`path`, `line_number`, `line`), plus `files_with_matches`, `files_searched` and `truncated`. Capped at 100 matches. Binary files, files over 1 MB and dependency/VCS folders (`.git`, `node_modules`, `.venv`, …) are skipped.
+
+`search_files` searches the whole workspace by default. The optional `path` limits the search to a directory or a single file:
+
+- `path` goes through the same `Workspace.resolve` check as every other path, so `..` escapes and absolute, drive-letter and UNC paths are rejected. A path that does not exist is a tool error.
+- Returned paths stay relative to the workspace root, so they can go straight into `read_file`.
+- Dependency and VCS folders are skipped only *below* the search path, so an explicit `path="node_modules/some-lib"` is searched.
+
+Unlike `search_code`, `search_files` looks at every text file, including prose such as `.md` and `.txt`.
+
+### Code search
 
 `search_code` is the developer-oriented search. It differs from `search_files` in four ways:
 
@@ -79,7 +460,7 @@ Example result for `search_code("format_price")` against the sample project:
 
 Oversized, binary (a NUL byte in the first 8 KB), non-UTF-8 and unreadable files are counted in `files_skipped` instead of causing an error. A query with no matches returns an empty `matches` list. An empty query, a missing path, a non-source file path, or a path outside the workspace returns a tool error.
 
-## Repository analysis
+### Repository analysis
 
 `analyze_repository()` collects **objective facts** about the whole workspace so an AI client can orient itself before reading code. It works only from file names, paths and the fields declared in dependency manifests. It never executes repository code, package managers or tests, and it never writes anything.
 
@@ -121,7 +502,7 @@ Output from the scratch full-stack repository used to test this phase (FastAPI b
 }
 ```
 
-### Facts
+#### Facts
 
 These are derived purely from paths:
 
@@ -136,7 +517,7 @@ These are derived purely from paths:
   - Test files match naming conventions: `test_*.py`, `*_test.py`, `*.test.js`/`.ts`/`.tsx`, `*.spec.js`/`.ts`/`.tsx`, `*_test.go`, `*Test.java`, `*_spec.rb` and similar.
   - Helpers such as `conftest.py` are not counted as test files.
 
-### Heuristics
+#### Heuristics
 
 These are grouped separately because they are not confirmed facts:
 
@@ -149,7 +530,7 @@ These are grouped separately because they are not confirmed facts:
   - `go.mod`, `pom.xml` and `build.gradle` are matched on exact module coordinates, e.g. `github.com/gin-gonic/gin` or `org.springframework.boot`.
   - A file called `django.py` or a folder called `flask/` is never evidence.
 
-### Bounds and failures
+#### Bounds and failures
 
 - Directories that `search_code` skips are skipped here too: VCS, dependency, cache and build output (`.git`, `.venv`, `node_modules`, `__pycache__`, `dist`, `build`, `*.egg-info`, …). Symlinks are not followed.
 - At most **20,000 files** are considered. If the scan stops early, `scan_complete` is `false`.
@@ -158,13 +539,13 @@ These are grouped separately because they are not confirmed facts:
 - A manifest that is malformed, binary or unreadable becomes a `warnings` entry instead of failing the call. If the workspace root has disappeared, the call returns a tool error.
 - TOML manifests are parsed with the standard-library `tomllib` (Python 3.11+). On Python 3.10 they are listed with a warning but not parsed.
 
-## Git tools
+### Git tools
 
 The four Git tools describe the repository's state and recent history. They **never change anything**: there is no add, commit, checkout, reset, fetch or push, and no index or file is written.
 
 **The workspace must be the repository root.** The tools run against `DEVPILOT_WORKSPACE` itself. If that directory is not the top level of a Git work tree, every Git tool returns *"The workspace is not a Git repository"*. Parent directories are never searched, and no repository is ever initialized. The default `./workspace` is a plain folder, so to use the Git tools, point `DEVPILOT_WORKSPACE` at a repository root, e.g. this project's own directory.
 
-### git_status
+#### git_status
 
 ```json
 {
@@ -188,7 +569,7 @@ The four Git tools describe the repository's state and recent history. They **ne
 - `branch` is `null` when HEAD is detached, and `head_commit` is `null` in a repository with no commits yet.
 - The data comes from `git status --porcelain=v2 -z`, which is machine-readable and handles any filename, including ones with spaces and non-ASCII characters.
 
-### git_log
+#### git_log
 
 `git_log(limit=2)` on this repository:
 
@@ -212,7 +593,7 @@ The four Git tools describe the repository's state and recent history. They **ne
 - `limit` must be an integer from 1 to 50. Anything else is rejected before Git runs.
 - `has_more` says whether older history exists. Git is asked for `limit + 1` commits only to work this out, so the full history is never read or returned.
 
-### git_diff
+#### git_diff
 
 - `git_diff()` shows **unstaged** changes (working tree compared to the index).
 - `git_diff(staged=true)` shows **staged** changes (index compared to HEAD).
@@ -236,7 +617,7 @@ The four Git tools describe the repository's state and recent history. They **ne
 - File statistics are always complete, even when the diff text is cut.
 - Binary files have `binary: true` and `null` line counts.
 
-### git_branch
+#### git_branch
 
 ```json
 {
@@ -248,7 +629,7 @@ The four Git tools describe the repository's state and recent history. They **ne
 
 Only local branches are listed, sorted by name. Nothing is ever created, deleted or switched.
 
-### Bounded output
+#### Bounded output
 
 | Limit | Value |
 |-------|-------|
@@ -261,7 +642,7 @@ Only local branches are listed, sorted by name. Nothing is ever created, deleted
 
 These values are constants at the top of `devpilot_mcp/tools/git.py`.
 
-### Read-only execution boundary
+#### Read-only execution boundary
 
 Git runs as a subprocess, so every invocation goes through a single function, `_run_git`:
 
@@ -274,11 +655,11 @@ Git runs as a subprocess, so every invocation goes through a single function, `_
 
 **Not covered:** clean/smudge filter drivers (`filter.<name>.clean`) configured in the repository's own `.git/config` cannot be disabled generically. Only run the Git tools on repositories whose `.git/config` you trust, as with running `git status` yourself.
 
-## GitHub tools
+### GitHub tools
 
 The three GitHub tools collect **objective facts** from GitHub's REST API for an AI client to reason about. They return GitHub's own values in a stable, normalized schema, never the raw API payload, and they draw no conclusions. They are **read-only**: nothing is ever created, edited, commented on, merged or deleted.
 
-### Which repository?
+#### Which repository?
 
 The repository is **always discovered from the workspace**, never passed as an argument:
 
@@ -299,7 +680,7 @@ Each of these is a clear tool error:
 
 Error messages never repeat the remote URL, because remote URLs can embed credentials.
 
-### Example output
+#### Example output
 
 `github_repository()` for this project (unauthenticated):
 
@@ -359,7 +740,7 @@ Some counts keep GitHub's own meaning:
 }
 ```
 
-### Issues and pull requests
+#### Issues and pull requests
 
 - **Pull requests are excluded from `github_issues`.** GitHub's issues API returns pull requests too, marked with a `pull_request` key. They are left out rather than shown as issues, and counted in `pull_requests_excluded`. Use `github_pull_requests` for them.
 - **What is left out:** issue and PR bodies, comments, reviews, changed files and commits.
@@ -368,7 +749,7 @@ Some counts keep GitHub's own meaning:
 - **Missing values** are `null`, or `[]` for lists, never guessed. A deleted user becomes `"author": null`, and a deleted fork becomes `"source_repository": null`.
 - **Order:** results keep GitHub's order, newest first.
 
-### Pagination, limits and rate limits
+#### Pagination, limits and rate limits
 
 - **`limit` is 1–50** (default 10). Anything else is rejected before any request is made.
 - **`github_pull_requests`** makes exactly one request with `per_page=limit`. `has_more` comes from the presence of a `rel="next"` page in GitHub's `link` header.
@@ -379,7 +760,7 @@ Some counts keep GitHub's own meaning:
 - **`rate_limit`** echoes GitHub's rate-limit headers: limit, remaining, used, reset time and resource. Unauthenticated requests get **60 per hour**. Once that is used up, a tool error states when the limit resets.
 - **No automatic retries.** Each request has a 15-second timeout, and at most 10 MB of a response is read.
 
-### Authentication
+#### Authentication
 
 `GITHUB_TOKEN` is **optional**:
 
@@ -394,7 +775,7 @@ Some counts keep GitHub's own meaning:
 
 No write permission is needed or used. Without access, GitHub answers a private repository with 404, and the error says the token is missing or lacks access.
 
-### Read-only HTTP boundary
+#### Read-only HTTP boundary
 
 `devpilot_mcp/github/client.py` is the only code that talks to GitHub:
 
@@ -413,7 +794,7 @@ No write permission is needed or used. Without access, GitHub answers a private 
   - The tests check tool output, every error path, captured logs, stdout/stderr and the workspace files for the token.
 - **No new dependencies.** HTTP uses Python's standard library (`urllib`).
 
-### Errors
+#### Errors
 
 These become tool errors with a clear message:
 - a missing workspace, a workspace that is not a repository root, or an origin with no, a non-GitHub or a malformed URL;
@@ -421,15 +802,7 @@ These become tool errors with a clear message:
 - redirects, timeouts and connection failures;
 - invalid JSON, a response in an unexpected shape, and invalid arguments.
 
-### Limitations
-
-- **github.com only.** GitHub Enterprise Server hosts are rejected.
-- **Only the `origin` remote is used.** For a fork you work on, `origin` is usually the fork.
-- **Bounded results.** Pages beyond the ones described above are not reachable, so only the most recent items up to `limit` are returned.
-- **Issues in pull-request-heavy repositories.** With only 3 pages scanned, `github_issues` can return fewer than `limit` issues, with `has_more: true`.
-- **Proxies.** HTTPS proxies set through the standard `HTTPS_PROXY` environment variable are used, as with any `urllib` client.
-
-## Developer investigation
+### Developer investigation
 
 `investigate_repository(query)` is the entry point for questions such as:
 
@@ -438,7 +811,7 @@ These become tool errors with a clear message:
 - *"What parts of the repository are involved in payment processing?"*
 - *"How are MCP tools registered?"*
 
-### DevPilot gathers evidence; the AI reasons
+#### DevPilot gathers evidence; the AI reasons
 
 The tool **never answers the question**. It calls no LLM, generates no explanation or plan, and makes no claim of semantic understanding.
 
@@ -447,7 +820,7 @@ The tool **never answers the question**. It calls no LLM, generates no explanati
 
 Every result carries an `evidence_note` saying so.
 
-### How evidence is gathered
+#### How evidence is gathered
 
 It reuses the existing read-only building blocks rather than new logic:
 
@@ -484,7 +857,7 @@ Query words come first in the order they appear, then synonyms, up to 8 terms. F
 
 Every relevant file includes `reasons`, such as `"file name contains 'github'"` or `"12 matching lines for 'auth'"`, so the ranking can be checked.
 
-### Output
+#### Output
 
 `investigate_repository("Where is GitHub integration implemented?")` on this repository, shortened:
 
@@ -518,7 +891,7 @@ Every relevant file includes `reasons`, such as `"file name contains 'github'"` 
 }
 ```
 
-### Bounded results
+#### Bounded results
 
 | Evidence | Limit |
 |----------|-------|
@@ -535,7 +908,7 @@ Every relevant file includes `reasons`, such as `"file name contains 'github'"` 
 - **Size:** answers on this repository are 15–18 KB.
 - **Not exhaustive:** the tool never claims to have found *all* relevant code.
 
-### Git and GitHub context
+#### Git and GitHub context
 
 - **Git context:** needs the workspace to be a Git repository root, as for the Git tools. Otherwise `git_context.available` is `false` with a reason, and the local evidence is still returned. A Git failure, such as a timeout, becomes a warning, not an error.
 - **GitHub context:** best effort, and only when `origin` is a github.com repository.
@@ -543,7 +916,7 @@ Every relevant file includes `reasons`, such as `"file name contains 'github'"` 
   - If GitHub fails (offline, rate-limited, 404…), no further GitHub requests are made, a warning is added, and the local investigation is returned in full.
   - An investigation costs at most 3 GitHub requests in the common case: repository, issues and pull requests. The issues request may take up to 3 pages. Unauthenticated use is limited to 60 GitHub requests per hour.
 
-### Security
+#### Security
 
 The tool only composes the existing read-only boundaries, so everything in [Security model](#security-model), [Read-only execution boundary](#read-only-execution-boundary) and [Read-only HTTP boundary](#read-only-http-boundary) applies:
 
@@ -556,15 +929,7 @@ The tool only composes the existing read-only boundaries, so everything in [Secu
   - Secret-looking values in the evidence are replaced with `[REDACTED]`, with a warning. These are GitHub tokens, AWS access key IDs, private-key headers and the configured `GITHUB_TOKEN`.
   - The token never appears in output, errors or logs.
 
-### Limitations
-
-- **Keyword heuristic, not understanding.** Synonyms outside the small table, typos and conceptual questions ("why is it slow?") are not bridged. Ask with concrete names for better evidence.
-- **Substring matching** can over-match short terms, e.g. `auth` in `author`. Ranking by rarity reduces, but does not remove, this noise.
-- **Self-reference.** When investigating DevPilot itself, `tools/investigation.py` matches many queries, because it contains the heuristic's own vocabulary and example queries.
-- **Scan budget.** In very large repositories the 2,000-line scan budget can run out; `truncated_fields` then includes `search_scan`.
-- **Recent items only.** Only the newest 30 open GitHub issues and PRs, and the last 50 commits, are checked for relevance.
-
-## Controlled code modification
+### Controlled code modification
 
 Phase 7 adds the only two tools that modify files. The division of labour is strict:
 
@@ -574,7 +939,7 @@ Phase 7 adds the only two tools that modify files. The division of labour is str
 
 Nothing is executed: no shell, tests, linters, formatters, package managers, build systems, hooks or repository scripts. Git is never used to apply or revert changes, and no LLM or GitHub call is made. `git_status` and `git_diff` simply see the edited working tree afterwards.
 
-### apply_patch
+#### apply_patch
 
 Pass a standard unified diff (the format of `diff -u` and `git diff`):
 
@@ -622,7 +987,7 @@ Result (from the MCP Inspector verification):
 
 Hunks must match the current file **exactly at the line numbers they state**. There is no offset search and no fuzz. A patch made against different or older content is rejected as stale instead of being forced in.
 
-### Validation pipeline
+#### Validation pipeline
 
 Every step runs for **every file** in the patch before anything is written:
 
@@ -645,14 +1010,14 @@ Every step runs for **every file** in the patch before anything is written:
 
 Errors name the file, hunk and line number but **never quote file or patch contents**, so a rejected patch cannot echo secrets back.
 
-### Atomicity
+#### Atomicity
 
 - **Stage:** every new file content is fully written (and `fsync`ed) to a temporary `.devpilot-staging-*` file in the target's own directory.
 - **Swap:** targets are then replaced with atomic renames (`os.replace`). Deleted files are renamed aside rather than removed.
 - **Roll back:** if anything fails during either step, every completed step is undone in reverse order, temporary files are removed, and newly created directories are cleaned up. The error says whether the rollback succeeded. If a rollback itself ever failed, the error names the affected files.
 - **Tested:** failures are forced partway through multi-file patches (modify, delete, create and modify at once), both while staging and after two files were already swapped in. The tests check that every original file is byte-identical afterwards and that no temporary file is left behind.
 
-### Protected files
+#### Protected files
 
 A patch can never create, modify or delete:
 
@@ -665,7 +1030,7 @@ A patch can never create, modify or delete:
 
 This is the same secret-file list `investigate_repository` already excludes from evidence (Phase 6). For writes, only `.env.example` is exempt. Names are compared case-insensitively.
 
-### Resource limits
+#### Resource limits
 
 | Limit | Value |
 |-------|-------|
@@ -680,7 +1045,7 @@ This is the same secret-file list `investigate_repository` already excludes from
 
 The constants are at the top of `devpilot_mcp/patching/changes.py`. Any limit is checked before a single byte is written.
 
-### Change registry and revert_patch
+#### Change registry and revert_patch
 
 - **What is recorded:** each successful `apply_patch` gets a random, unique `change_id` (`chg_` + 16 hex digits). The in-memory registry keeps:
   - the patch SHA-256 and the time;
@@ -707,15 +1072,7 @@ The constants are at the top of `devpilot_mcp/patching/changes.py`. Any limit is
  "files_restored_count": 2}
 ```
 
-### Limitations
-
-- **The registry lives in memory.** A restart, or a new server process, forgets every `change_id`. MCP Inspector's CLI mode starts a new server for each call, so to revert across processes, apply an explicit reverse patch. The web UI and normal MCP clients keep one session.
-- **Exact matching.** Hunks must match at their stated lines, so patches with wrong line numbers or counts are rejected, not guessed at.
-- **Unsupported operations:** renames (use a deletion plus a creation), mode changes, binary files, non-UTF-8 files, empty-file creation, quoted paths and patches in any other format.
-- **Revert checks hashes, not stored copies.** To keep memory bounded, the post-apply state is verified by SHA-256 and size rather than a stored copy of the new bytes. The original bytes needed for restoring are always stored.
-- **One server at a time.** Applies and reverts are serialized within one server. Two DevPilot servers editing the same workspace do not coordinate, although stale-patch and revert checks still refuse to overwrite changes they did not make.
-
-## Testing and validation
+### Testing and validation
 
 Phase 8 adds objective validation evidence to the loop:
 
@@ -725,7 +1082,7 @@ DevPilot runs the repository's tests in a tightly controlled way and reports wha
 
 > **Arbitrary shell commands are not supported.** No tool accepts a command, executable, argument list or shell string. Only two fixed test commands exist, and DevPilot chooses between them from repository evidence.
 
-### Supported frameworks
+#### Supported frameworks
 
 Python only, with exactly these commands. `python` means the selected interpreter, described under [Security restrictions](#security-restrictions).
 
@@ -734,7 +1091,7 @@ Python only, with exactly these commands. `python` means the selected interprete
 | pytest | `python -m pytest -p no:cacheprovider` (the cache plugin is disabled so DevPilot writes no `.pytest_cache`) |
 | unittest | `python -m unittest`, or `python -m unittest discover -s <dir>` when the tests live in a directory without `__init__.py`. Root discovery cannot reach such directories on Python 3.11+, so `<dir>` is taken from the repository's own layout and validated before use. |
 
-### get_test_commands
+#### get_test_commands
 
 This tool inspects files only. It never imports or runs anything.
 
@@ -772,7 +1129,7 @@ On DevPilot itself:
 }
 ```
 
-### run_tests
+#### run_tests
 
 - **Which command runs:** the primary framework's command, or the one named by `framework`, which must also have been **detected**. Anything else, such as `"; whoami"` or `"cmd /c …"`, is rejected before a process starts.
 - **Timeout:** `timeout_seconds` is 1–600 (default 120). When it runs out, the test process is killed and the status is `timed_out`.
@@ -803,7 +1160,7 @@ The example above comes from the Phase 8 verification run on Windows. `removed_e
 - **Counts:** parsed from pytest's summary line or unittest's `Ran N tests … OK/FAILED (…)` lines. When there is no summary, the counts are `null`, never invented.
 - **Output:** stdout and stderr are returned separately.
 
-### validate_repository
+#### validate_repository
 
 The checks always run in this order:
 
@@ -833,7 +1190,7 @@ A failing example (a failing assertion and a syntax error in a disposable reposi
 "failures": ["test_execution: …", "python_syntax: …"]
 ```
 
-### Security restrictions
+#### Security restrictions
 
 - **No caller-supplied commands.** `run_tests` takes only an enum and an integer. Extra MCP arguments such as `command`, `executable`, `shell`, `cwd` or `env` are dropped by the server.
 - **No commands from repository config.** Configuration is inspected as evidence only. The one derived argument, the `discover -s` directory, must be an existing directory inside the workspace that cannot be read as an option. Before anything runs, the argument vector is checked against the fixed command shapes.
@@ -852,7 +1209,7 @@ A failing example (a failing assertion and a syntax error in a disposable reposi
   - The workspace path and interpreter path are shown as `<workspace>` and `<python>`.
 - **One run at a time** per server. A concurrent request is refused.
 
-### Timeout and output limits
+#### Timeout and output limits
 
 | Limit | Value |
 |-------|-------|
@@ -862,7 +1219,7 @@ A failing example (a failing assertion and a syntax error in a disposable reposi
 | Syntax check | up to 5,000 files of at most 1 MB each; up to 50 errors and 50 warnings listed |
 | Detection | up to 50 test files inspected (256 KB each) and 10 evidence items per framework |
 
-### Side effects
+#### Side effects
 
 **Running tests means running repository code.** Test code, `conftest.py` and the repository's own pytest configuration run with the permissions of the DevPilot process. They can read and write files and use the network.
 
@@ -872,178 +1229,61 @@ A failing example (a failing assertion and a syntax error in a disposable reposi
 
 Only run tests of repositories whose test code you are willing to execute.
 
-### Windows considerations
+#### Windows considerations
 
 - **Absolute interpreter path.** Windows' process launcher also searches the current directory, so a bare `python` could pick up a `python.exe` planted in the repository. DevPilot always launches the interpreter by absolute path.
 - **No console windows.** Processes start with `CREATE_NO_WINDOW`. Output is read by background threads, so a chatty test cannot deadlock a pipe.
 - **unittest discovery.** It only descends into packages (Python 3.11+), which is why a `tests/` folder without `__init__.py` gets `discover -s tests`.
-- **Test runs are verified on Windows:** DevPilot ran its own 349-test suite through `validate_repository(run_tests=true)` over MCP stdio, with 345 passed, 4 skipped, no side effects, and the repository and `.git` byte-identical afterwards.
+- **Test runs are verified on Windows:** during the Phase 8 verification, DevPilot ran its own suite (349 tests at the time) through `validate_repository(run_tests=true)` over MCP stdio, with 345 passed, 4 skipped, no side effects, and the repository and `.git` byte-identical afterwards.
 
-### Limitations
+## Development / Testing
 
-- **Python only:** pytest and unittest. No tox, nox, make or package-manager scripts are run, even when configured.
-- **Interpreter and dependencies.** Tests run with DevPilot's own interpreter unless `DEVPILOT_TEST_PYTHON` is set. A project whose dependencies (including pytest) are not installed there reports `status: "error"` with a warning.
-- **Timeouts kill one process.** On timeout, only the test process itself is killed. Processes the tests started themselves may outlive it.
-- **Partial isolation.** Side-effect detection uses sizes and timestamps, not content hashes, and skips `.git`, dependency and cache folders. There is no sandbox, network isolation or filesystem isolation beyond the sanitized environment.
-- **Counts come from summary text.** Heavily customised pytest output can leave counts `null`.
-- **Syntax is checked with DevPilot's Python grammar**, so code for a newer Python may be reported as a syntax error.
-
-## Security model
-
-All paths are relative to the workspace root. `Workspace.resolve()` in `devpilot_mcp/workspace.py` is the only way a tool turns a path into a filesystem location. It:
-
-1. rejects null bytes, absolute paths (`/etc/passwd`), drive-letter paths (`C:\Users\…`, `D:\other-project\…`, `c:foo`) and UNC paths (`\\server\share`);
-2. joins the path to the root and calls `resolve()`, which collapses `..` and follows symlinks;
-3. checks that the result is still inside the root. If it isn't, the request is rejected (`../../secret.txt` fails here).
-
-A symlink inside the workspace that points outside it is hidden from `list_directory`, skipped by `search_files`, `search_code` and `analyze_repository`, and rejected by `read_file`. `analyze_repository` takes no path at all. It always analyzes the workspace root, and any extra arguments are dropped. Error messages never include absolute host paths.
-
-## Project structure
-
-```
-DevPilot-MCP/
-├── devpilot_mcp/
-│   ├── __main__.py        # enables `python -m devpilot_mcp`
-│   ├── server.py          # builds the MCPServer, registers tool groups, stdio entry point
-│   ├── config.py          # loads DEVPILOT_WORKSPACE from the environment / .env
-│   ├── workspace.py       # path sandboxing (the security boundary)
-│   ├── text_search.py     # shared file walking, text detection and line matching
-│   ├── testing/
-│   │   ├── detection.py   # test-framework detection and the fixed commands (nothing executed)
-│   │   ├── runner.py      # the controlled, shell-free, bounded test execution
-│   │   └── syntax.py      # Python syntax validation by parsing only
-│   ├── patching/
-│   │   ├── unified_diff.py # strict unified-diff parser and in-memory hunk application
-│   │   └── changes.py     # validation, atomic commit/rollback, change registry, revert
-│   ├── github/
-│   │   ├── remote.py      # discovers owner/repo from the origin remote
-│   │   └── client.py      # read-only GitHub REST client (the only code that calls GitHub)
-│   └── tools/
-│       ├── common.py      # shared MCP helpers (read-only annotations, error mapping)
-│       ├── filesystem.py  # list_directory, read_file, search_files
-│       ├── code_search.py # search_code
-│       ├── repository.py  # analyze_repository
-│       ├── git.py         # git_status, git_log, git_diff, git_branch
-│       ├── github.py      # github_repository, github_issues, github_pull_requests
-│       ├── investigation.py # investigate_repository
-│       ├── patch.py       # apply_patch, revert_patch (the only write tools)
-│       └── testing.py     # get_test_commands, run_tests, validate_repository
-├── tests/                 # unittest suite (sandboxing, tool logic, in-process MCP client)
-├── workspace/
-│   └── sample_project/    # small demo repo to explore with the tools
-├── .env.example
-└── pyproject.toml
-```
-
-To add a tool group in a later phase, create a new module in `devpilot_mcp/tools/` with a `register(server, workspace)` function, then call it from `create_server()` in `server.py`.
-
-## Setup
-
-Requires Python 3.10+. From the project root:
-
-```powershell
-python -m venv .venv
-.venv\Scripts\activate           # macOS/Linux: source .venv/bin/activate
-pip install -e .
-copy .env.example .env           # macOS/Linux: cp .env.example .env
-```
-
-### Configuration
-
-| Variable | Default | Meaning |
-|----------|---------|---------|
-| `GITHUB_TOKEN` | *(unset)* | Optional fine-grained token with read-only Metadata, Issues and Pull requests permissions, for private repositories or a higher rate limit. Keep it in `.env` (git-ignored) or the environment; never commit it. |
-| `DEVPILOT_TEST_PYTHON` | *(unset)* | Optional **absolute** path to the Python interpreter `run_tests` uses, e.g. a project's own venv `python.exe`. Default: the interpreter running DevPilot. Set only by the server operator; no tool argument can change it. |
-| `DEVPILOT_WORKSPACE` | `./workspace` | The directory the tools can access. A relative path is resolved against the **project root**, not the current directory, so the server behaves the same whichever directory a client launches it from. |
-
-If the directory doesn't exist, the server exits at startup with an error on stderr.
-
-## Running the server
-
-The server uses the stdio transport, so an MCP client normally starts it. To start it by hand:
-
-```powershell
-devpilot-mcp
-# or
-python -m devpilot_mcp
-```
-
-It then waits silently for MCP messages on stdin. Press Ctrl+C to stop it.
-
-## Testing with MCP Inspector
-
-Requires Node.js. Run these commands from the project root with the virtual environment activated.
-
-### Inspector web UI
-
-```powershell
-npx @modelcontextprotocol/inspector
-```
-
-In the page that opens:
-
-1. Set **Transport Type** to `STDIO`.
-2. Set **Command** to the full path of `.venv\Scripts\devpilot-mcp.exe`. On macOS/Linux use `.venv/bin/devpilot-mcp`. Leave **Arguments** empty.
-3. Optionally, add `DEVPILOT_WORKSPACE` under **Environment Variables** to point the server at a different directory.
-4. Click **Connect**, open the **Tools** tab, then click **List Tools**. The eighteen tools should appear.
-5. Try these calls:
-   - `list_directory` with `path` = `sample_project`
-   - `read_file` with `path` = `sample_project/src/inventory.py`
-   - `search_files` with `query` = `TODO`
-   - `search_code` with `query` = `format_price`. Expect 3 matches in `src/inventory.py` and `src/utils.py`.
-   - `search_code` with `query` = `def` and `path` = `sample_project/src`. The search is limited to that folder.
-   - `search_code` with `query` = `Inventory`. The search is case-sensitive, so the lowercase variable `inventory` doesn't match.
-   - `search_code` with `query` = `no_such_symbol`. Expect an empty `matches` list.
-   - `search_code` with `query` = `x` and `path` = `../../secret`. The call should be rejected.
-   - `read_file` with `path` = `../../secret.txt`. The call should be rejected with *"Path escapes the workspace root"*.
-   - `git_status`, `git_log`, `git_diff` and `git_branch`. Against the default `./workspace` these return *"The workspace is not a Git repository"*, because `./workspace` is a plain folder. Set `DEVPILOT_WORKSPACE` to a repository root, e.g. this project's directory, and reconnect. Then try `git_log` with `limit` = `3`, and `git_diff` with and without `staged` = `true` after editing or staging a file.
-   - `investigate_repository` with `query` = `Where is GitHub integration implemented?`. The result is evidence (ranked files with reasons, matching lines, excerpts, Git and GitHub context), not an answer. Try also `How is this project structured?`, `How are MCP tools registered?` and `How is workspace security implemented?`. A whitespace-only query is rejected.
-   - `apply_patch`, **against a disposable copy of a repository**. Paste a small unified diff, apply it, and check the file with `read_file` and `git_status`. Then call `revert_patch` with the returned `change_id` in the same session, and confirm the original content is back. Also try a stale patch (apply the same one twice) and a patch for `.env`; both are rejected and nothing changes.
-   - `get_test_commands`. Nothing is run. Then `validate_repository` with the defaults: `test_execution` is `skipped`. Then, **against a repository whose tests you are willing to execute**, `run_tests` with `timeout_seconds` = `60`, and `validate_repository` with `run_tests` = `true`. Try `framework` = `; whoami`; the call is rejected.
-   - `github_repository`, `github_issues` with `limit` = `5`, and `github_pull_requests` with `limit` = `5`. Like the Git tools, these need `DEVPILOT_WORKSPACE` to be a repository root whose `origin` points to github.com, e.g. this project's directory. A repository with no issues or pull requests returns empty lists. Also try `state` = `merged` or `limit` = `51`; both are rejected.
-   - `analyze_repository` with no arguments. Against the sample project, expect 4 files (`Python: 3`, `Markdown: 1`), the test directory `sample_project/tests` and empty `heuristics`, because the sample has no manifests. To analyze a real repository, set `DEVPILOT_WORKSPACE` in step 3 to that repository's path and reconnect.
-
-### Inspector CLI (scriptable)
-
-```powershell
-npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe --method tools/list
-npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe --method tools/call --tool-name search_files --tool-arg query=TODO
-npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe --method tools/call --tool-name search_code --tool-arg query=class
-npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe --method tools/call --tool-name search_code --tool-arg query=def path=sample_project/src
-npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe --method tools/call --tool-name read_file --tool-arg path=../../secret.txt
-npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe --method tools/call --tool-name analyze_repository
-npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/other-repo --method tools/call --tool-name analyze_repository
-npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-git-repo --method tools/call --tool-name git_status
-npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-git-repo --method tools/call --tool-name git_log --tool-arg limit=3
-npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-git-repo --method tools/call --tool-name git_diff --tool-arg staged=true
-npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-github-clone --method tools/call --tool-name github_repository
-npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-github-clone --method tools/call --tool-name github_issues --tool-arg state=all limit=5
-npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-github-clone --method tools/call --tool-name github_pull_requests --tool-arg limit=5
-npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-repo --method tools/call --tool-name investigate_repository --tool-arg "query=How is authentication implemented?"
-npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-disposable-copy --method tools/call --tool-name apply_patch --tool-arg "patch=\"--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-# Old title\n+# New title\n\""
-npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-repo --method tools/call --tool-name get_test_commands
-npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-repo --method tools/call --tool-name run_tests --tool-arg timeout_seconds=60
-npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-repo --method tools/call --tool-name validate_repository --tool-arg run_tests=true
-```
-
-The Inspector CLI mangles raw multi-line values, so pass a patch as a **JSON-encoded string** (with `\n` escapes), as above. Each Inspector CLI call starts a new server, so `revert_patch` from a separate CLI call finds no change. Use the web UI, or any client that keeps one session, to apply and revert.
-
-Launch the server through the `devpilot-mcp` executable rather than `python -m devpilot_mcp`. The Inspector CLI parses flags such as `-m` and `-e` itself, so they never reach the server.
-
-## Running the tests
+The suite uses only the standard library's `unittest`; pytest is not a dependency and is not needed. Run everything from the project root with the virtual environment active:
 
 ```powershell
 python -m unittest discover -s tests -t . -v
 ```
 
-The suite builds a temporary workspace with a `secret.txt` just outside it. It checks the path-escape attempts listed under [Security model](#security-model), every tool's normal and error cases, and full round trips through an in-process MCP client. The Git tests need `git` on `PATH`. They build throwaway repositories with an isolated Git config, and are skipped if Git is not installed. The GitHub tests **never contact GitHub**. Tool and client tests use a fake transport, and the HTTP transport is tested against local `127.0.0.1` servers. The investigation tests use a fake GitHub client, real throwaway Git repositories and hashes of every file before and after. On Windows the symlink-escape test is skipped unless Developer Mode is on, because creating symlinks requires it.
+The full suite can take a few minutes, because many tests start real Git and Python processes and run real test suites in throwaway projects. While working on one area, run a single module, class or test:
 
-The patch tests attempt the full set of malicious patches (traversal, absolute, drive and UNC paths, symlinks and Windows junctions, protected files, unexpected metadata, oversized and malformed patches). Each one takes a byte-level snapshot before and after.
+```powershell
+python -m unittest tests.test_filesystem_tools -v
+python -m unittest tests.test_filesystem_tools.SearchFilesPathTests -v
+python -m unittest tests.test_server.ServerTests.test_annotation_profiles_are_intentional -v
+```
 
-The Phase 8 tests run real unittest suites in throwaway projects, covering passing, failing, skipped, timed-out, truncated, side-effecting and no-tests runs. They also try shell and command injection payloads (`; whoami`, `&& powershell …`, `cmd /c …`, `../../…`, absolute and UNC paths, tampered argument vectors) and check that no process starts, and that the environment and output leak no secrets.
+The Git tests need `git` on `PATH`. They build throwaway repositories with an isolated Git config, and are skipped if Git is not installed. The GitHub tests **never contact GitHub**: tool and client tests use a fake transport, and the HTTP transport is tested against local `127.0.0.1` servers. On Windows, the symlink-escape tests are skipped unless Developer Mode is on, because creating symlinks requires it.
 
-Current result: **349 tests, 345 passed, 4 skipped, 0 failed.** The skips are the three Windows symlink tests that need Developer Mode, and the real-pytest test, because pytest is not installed in DevPilot's environment. pytest behaviour is still covered by parsing recorded output and by a real "pytest not installed" run.
+Current result on Windows (Python 3.12): **359 tests, 355 passed, 4 skipped, 0 failed.** The skips are the three Windows symlink tests that need Developer Mode, and the real-pytest test, because pytest is not installed in DevPilot's environment. On Linux (Ubuntu, Python 3.12) the same suite passes with 2 skipped: the Windows-only junction test and the real-pytest test. pytest behaviour is still covered by parsing recorded output and by a real "pytest not installed" run.
 
-## Roadmap
+**Continuous integration:** `.github/workflows/test.yml` installs the package and runs the same `unittest` command on every push and pull request, on Ubuntu and Windows with Python 3.11 and 3.12.
 
-Phase 1 added read-only filesystem access, Phase 2 added code search, Phase 3 added repository analysis, Phase 4 added read-only Git intelligence, Phase 5 added read-only GitHub integration, Phase 6 added evidence gathering for developer investigation, Phase 7 added controlled code modification, and Phase 8 added testing and validation. In Phase 7 the caller supplies an explicit patch; DevPilot validates it, applies it atomically, tracks it and can revert it. DevPilot still never decides what to change. The only code it runs is the repository's tests, through two fixed commands and only on request; arbitrary commands are not supported. Later phases will be designed separately.
+## Security Testing
+
+The suite builds a temporary workspace with a `secret.txt` just outside it. It checks the path-escape attempts listed under [Workspace boundary](#workspace-boundary) for every path-taking tool, including `search_files` with a `path`, every tool's normal and error cases, and full round trips through an in-process MCP client. A test pins the annotation profile of all 18 tools.
+
+- **Git:** each blocked route for launching programs (fsmonitor, external diff, textconv, pager, …) is shown to be live with plain `git` and blocked in DevPilot, and a snapshot of every file, `.git` included, proves that nothing is written.
+- **GitHub:** tool output, every error path, captured logs, stdout/stderr and the workspace files are checked for the token, and redirects and non-`api.github.com` hosts are refused.
+- **Investigation:** tests use a fake GitHub client, real throwaway Git repositories and hashes of every file before and after.
+- **Patching:** the patch tests attempt the full set of malicious patches (traversal, absolute, drive and UNC paths, symlinks and Windows junctions, protected files, unexpected metadata, oversized and malformed patches). Each one takes a byte-level snapshot before and after. Failures are forced partway through multi-file patches to prove rollback.
+- **Testing and validation:** the Phase 8 tests run real unittest suites in throwaway projects, covering passing, failing, skipped, timed-out, truncated, side-effecting and no-tests runs. They also try shell and command injection payloads (`; whoami`, `&& powershell …`, `cmd /c …`, `../../…`, absolute and UNC paths, tampered argument vectors) and check that no process starts, and that the environment and output leak no secrets.
+
+## Phase History
+
+DevPilot was built in phases, each adding one capability on top of the same boundaries:
+
+1. **Filesystem intelligence:** read-only `list_directory`, `read_file` and `search_files`.
+2. **Code search:** `search_code`, source files only, scoped to a subdirectory or file.
+3. **Repository understanding:** `analyze_repository`, a deterministic, factual overview.
+4. **Git intelligence:** read-only `git_status`, `git_log`, `git_diff` and `git_branch`.
+5. **GitHub integration:** read-only `github_repository`, `github_issues` and `github_pull_requests` for the `origin` repository.
+6. **Developer investigation:** `investigate_repository(query)`, ranked and bounded evidence for a developer question.
+7. **Controlled patching:** `apply_patch` applies an explicit, caller-supplied unified diff atomically; `revert_patch` undoes it by `change_id`.
+8. **Testing and validation:** `get_test_commands`, `run_tests` (two fixed commands, on request only) and `validate_repository`.
+9. **Production cleanup:** optional `path` for `search_files`, shared low-level modules, one documented set of annotation profiles, CI, this README and the MIT license.
+
+Throughout, DevPilot never decides what to change and never runs arbitrary commands: the caller supplies every patch, and the only code it runs is the repository's tests, through two fixed commands and only on request.
+
+## License
+
+DevPilot MCP is released under the [MIT License](LICENSE).

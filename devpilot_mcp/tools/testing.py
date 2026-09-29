@@ -14,7 +14,6 @@ from __future__ import annotations
 from typing import Annotated, Literal
 
 from mcp.server.mcpserver import MCPServer
-from mcp_types import ToolAnnotations
 from pydantic import BaseModel, Field
 
 from devpilot_mcp.testing import runner
@@ -22,11 +21,8 @@ from devpilot_mcp.testing.detection import TestCommandsResult, detect_test_comma
 from devpilot_mcp.testing.runner import DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS, TestRunResult
 from devpilot_mcp.testing.syntax import SyntaxReport, check_python_syntax
 from devpilot_mcp.tools import git, repository
-from devpilot_mcp.tools.common import READ_ONLY, as_tool_error
+from devpilot_mcp.tools.common import EXECUTES_CODE, READ_ONLY, as_tool_error
 from devpilot_mcp.workspace import PathNotFoundError, Workspace, WorkspaceError
-
-# Executes repository test code, which may have side effects and may use the network.
-EXECUTION = ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=True)
 
 Timeout = Annotated[int, Field(ge=1, le=MAX_TIMEOUT_SECONDS)]
 
@@ -233,7 +229,7 @@ def register(server: MCPServer, workspace: Workspace) -> None:
         except (WorkspaceError, OSError) as exc:
             raise as_tool_error(exc) from exc
 
-    @server.tool(name="run_tests", annotations=EXECUTION)
+    @server.tool(name="run_tests", annotations=EXECUTES_CODE)
     def run_tests_tool(
         framework: Literal["pytest", "unittest"] | None = None,
         timeout_seconds: Timeout = DEFAULT_TIMEOUT_SECONDS,
@@ -257,7 +253,7 @@ def register(server: MCPServer, workspace: Workspace) -> None:
         except (WorkspaceError, OSError) as exc:
             raise as_tool_error(exc) from exc
 
-    @server.tool(name="validate_repository", annotations=EXECUTION)
+    @server.tool(name="validate_repository", annotations=EXECUTES_CODE)
     def validate_repository_tool(
         run_tests: bool = False,
         timeout_seconds: Timeout = DEFAULT_TIMEOUT_SECONDS,

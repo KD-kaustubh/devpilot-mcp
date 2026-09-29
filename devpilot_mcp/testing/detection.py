@@ -22,6 +22,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from devpilot_mcp.manifests import pyproject_dependency_names, requirements_txt_names
 from devpilot_mcp.text_search import NotATextFileError, read_text
 from devpilot_mcp.tools import repository
 from devpilot_mcp.workspace import PathNotFoundError, Workspace, WorkspaceError
@@ -184,7 +185,7 @@ def _inspect_config(root: Path, pytest: _Evidence, warnings: list[str]) -> None:
                 if isinstance(tool.get("pytest"), dict):
                     pytest.add("high", "pyproject.toml [tool.pytest]")
                 try:
-                    if "pytest" in repository._pyproject_names(data):
+                    if "pytest" in pyproject_dependency_names(data):
                         pytest.add("medium", "pyproject.toml declares pytest")
                 except (AttributeError, TypeError):
                     warnings.append("pyproject.toml dependencies have an unexpected structure.")
@@ -211,7 +212,7 @@ def _inspect_requirements(workspace: Workspace, manifests: list[str], pytest: _E
         if not re.fullmatch(r"requirements[^/]*\.txt", rel.rsplit("/", 1)[-1]):
             continue
         text = _read_small(workspace.root / rel)
-        if text is not None and "pytest" in repository._requirements_txt_names(text):
+        if text is not None and "pytest" in requirements_txt_names(text):
             pytest.add("medium", f"{rel} declares pytest")
 
 

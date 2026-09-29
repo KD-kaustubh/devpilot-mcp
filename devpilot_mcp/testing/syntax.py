@@ -14,8 +14,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from devpilot_mcp.text_search import BINARY_SNIFF_BYTES, SKIPPED_DIRS, iter_files
-from devpilot_mcp.tools.code_search import GENERATED_DIRS
+from devpilot_mcp.text_search import BINARY_SNIFF_BYTES, GENERATED_DIRS, SKIPPED_DIRS, iter_files
 from devpilot_mcp.workspace import PathNotFoundError, Workspace
 
 MAX_SYNTAX_FILES = 5_000

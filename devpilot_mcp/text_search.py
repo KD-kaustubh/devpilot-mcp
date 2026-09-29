@@ -24,6 +24,12 @@ SKIPPED_DIRS = frozenset(
     {".git", ".hg", ".svn", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache", ".tox"}
 )
 
+# Build output and tool caches, skipped on top of SKIPPED_DIRS by the source-oriented scans
+# (search_code, analyze_repository, investigate_repository, syntax validation).
+GENERATED_DIRS = frozenset(
+    {"build", "dist", "target", ".next", ".nuxt", "coverage", "htmlcov", ".ruff_cache", ".gradle", ".eggs", "*.egg-info"}
+)
+
 
 class NotATextFileError(WorkspaceError):
     """The file is binary, not valid UTF-8, or too large to return."""

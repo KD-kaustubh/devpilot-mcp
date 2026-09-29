@@ -27,16 +27,23 @@ from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
 
 from mcp.server.mcpserver import MCPServer
-from mcp_types import ToolAnnotations
 from pydantic import BaseModel, Field
 
 from devpilot_mcp.github.client import TOKEN_ENV_VAR, GitHubClient
 from devpilot_mcp.github.remote import GitHubRemoteError, discover_github_repository
-from devpilot_mcp.text_search import SKIPPED_DIRS, NotATextFileError, iter_files, read_text, scan_files
+from devpilot_mcp.sensitive import REDACTED, SECRET_FILE_PATTERNS, SECRET_VALUE_PATTERNS
+from devpilot_mcp.text_search import (
+    GENERATED_DIRS,
+    SKIPPED_DIRS,
+    NotATextFileError,
+    iter_files,
+    read_text,
+    scan_files,
+)
 from devpilot_mcp.tools import filesystem, git, repository
 from devpilot_mcp.tools import github as github_tools
-from devpilot_mcp.tools.code_search import GENERATED_DIRS, MAX_CODE_FILE_BYTES, is_source_file
-from devpilot_mcp.tools.common import as_tool_error
+from devpilot_mcp.tools.code_search import MAX_CODE_FILE_BYTES, is_source_file
+from devpilot_mcp.tools.common import READ_ONLY, as_tool_error
 from devpilot_mcp.workspace import PathNotFoundError, Workspace, WorkspaceError
 
 # --- Limits ------------------------------------------------------------------
@@ -128,19 +135,9 @@ QUERY_WEIGHT = 2
 SYNONYM_WEIGHT = 1
 KIND_FACTOR = {"source": 1.0, "test": 0.7, "documentation": 0.6}
 
-# Evidence never includes likely secret files, even if their extension looks like source/config.
-SECRET_FILE_PATTERNS = (
-    ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*", "id_dsa*", "id_ecdsa*", "id_ed25519*",
-    "credentials.json", "secrets.*", "*.secrets.*", ".npmrc", ".pypirc", ".netrc",
-)  # fmt: skip
+# Evidence never includes likely secret files (devpilot_mcp.sensitive), even if their extension
+# looks like source/config. Templates are safe to show as evidence.
 SECRET_FILE_EXCEPTIONS = (".env.example", ".env.sample", ".env.template")
-_SECRET_VALUE_PATTERNS = (
-    re.compile(r"gh[pousr]_[A-Za-z0-9]{30,}"),
-    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
-    re.compile(r"AKIA[0-9A-Z]{16}"),
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-)
-REDACTED = "[REDACTED]"
 
 
 def _stem(word: str) -> str:
@@ -386,7 +383,7 @@ class _Redactor:
         if self._token and self._token in text:
             self.count += text.count(self._token)
             text = text.replace(self._token, REDACTED)
-        for pattern in _SECRET_VALUE_PATTERNS:
+        for pattern in SECRET_VALUE_PATTERNS:
             text, n = pattern.subn(REDACTED, text)
             self.count += n
         return text
@@ -851,17 +848,14 @@ def investigate_repository(workspace: Workspace, client: GitHubClient, query: st
 
 # --- MCP registration --------------------------------------------------------
 
-# Read-only, but open-world: it may read public GitHub data for the origin repository.
-INVESTIGATION_ANNOTATIONS = ToolAnnotations(
-    read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=True
-)
-
 
 def register(server: MCPServer, workspace: Workspace, client: GitHubClient | None = None) -> None:
     """Expose investigate_repository on `server`, bound to the workspace."""
     client = client or GitHubClient()
 
-    @server.tool(name="investigate_repository", annotations=INVESTIGATION_ANNOTATIONS)
+    # READ_ONLY (openWorldHint=False): its only external calls are the same three fixed
+    # api.github.com endpoints the github_* tools use. See tools/common.py.
+    @server.tool(name="investigate_repository", annotations=READ_ONLY)
     def investigate_repository_tool(
         query: Annotated[str, Field(min_length=1, max_length=MAX_QUERY_CHARS)],
     ) -> InvestigationResult:
