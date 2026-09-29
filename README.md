@@ -9,7 +9,8 @@ It is being built in phases:
 - **Phase 3: repository understanding.** `analyze_repository` returns a deterministic, factual overview of the repository.
 - **Phase 4: Git intelligence.** `git_status`, `git_log`, `git_diff` and `git_branch` give read-only, structured Git information.
 - **Phase 5: GitHub integration.** `github_repository`, `github_issues` and `github_pull_requests` read objective GitHub facts for the repository behind the workspace's `origin` remote.
-- **Phase 6 (this release): developer investigation.** `investigate_repository(query)` gathers ranked, bounded evidence for a developer question: relevant files, matching lines, source excerpts, and Git and GitHub context. The consuming AI then reasons over that evidence.
+- **Phase 6: developer investigation.** `investigate_repository(query)` gathers ranked, bounded evidence for a developer question: relevant files, matching lines, source excerpts, and Git and GitHub context. The consuming AI then reasons over that evidence.
+- **Phase 7 (this release): controlled code modification.** `apply_patch` applies an explicit unified diff **supplied by the caller**, validated in full and applied atomically, and `revert_patch` undoes it by `change_id`. DevPilot never generates or chooses changes itself.
 
 The server never touches anything outside one configured workspace directory.
 
@@ -29,9 +30,11 @@ The server never touches anything outside one configured workspace directory.
 | `github_repository` | none | GitHub metadata for the `origin` repository: description, default branch, visibility, flags, timestamps, language, license, topics and counts. See [GitHub tools](#github-tools). |
 | `github_issues` | `state` (`open`/`closed`/`all`, default `open`), `limit` (1–50, default 10) | Issues only (pull requests excluded and counted), newest first: number, title, state, author, labels, assignees, comment count, timestamps and URL. `has_more`. |
 | `investigate_repository` | `query` (1–500 characters) | Structured **evidence** for a developer question, not an answer: search terms, repository facts, ranked relevant files and directories with reasons, matching lines, source excerpts, and Git and GitHub context. See [Developer investigation](#developer-investigation). |
+| `apply_patch` ✏️ | `patch`: a unified diff, up to 256 KB | **Writes files.** Validates the whole caller-supplied patch, then applies it atomically. Returns a `change_id`, the patch SHA-256, and per-file change type, line counts and SHA-256 before/after. See [Controlled code modification](#controlled-code-modification). |
+| `revert_patch` ✏️ | `change_id` from `apply_patch` | **Writes files.** Restores the exact previous bytes of every file in that change, or refuses if any of them changed since. |
 | `github_pull_requests` | `state` (`open`/`closed`/`all`, default `open`), `limit` (1–50, default 10) | Pull requests, newest first: number, title, state, draft, author, timestamps including `merged_at`, source and target branch and repository, labels, assignees, requested reviewers and teams, and URL. `has_more`. |
 
-Every tool returns **structured output**, and its JSON schema is published to the client. Every tool is also marked `readOnlyHint: true`. An expected failure, such as a missing file or a rejected path, comes back as a tool error (`isError: true`) with a clear message instead of crashing the server.
+Every tool returns **structured output**, and its JSON schema is published to the client. Every tool is marked `readOnlyHint: true` except the two Phase 7 write tools, `apply_patch` and `revert_patch`, which are marked `readOnlyHint: false` and `destructiveHint: true`. An expected failure, such as a missing file or a rejected path, comes back as a tool error (`isError: true`) with a clear message instead of crashing the server.
 
 ## Code search
 
@@ -552,6 +555,157 @@ The tool only composes the existing read-only boundaries, so everything in [Secu
 - **Scan budget.** In very large repositories the 2,000-line scan budget can run out; `truncated_fields` then includes `search_scan`.
 - **Recent items only.** Only the newest 30 open GitHub issues and PRs, and the last 50 commits, are checked for relevance.
 
+## Controlled code modification
+
+Phase 7 adds the only two tools that modify files. The division of labour is strict:
+
+- **The caller (the AI client or a person) writes the patch.** DevPilot does not generate, choose, complete or "fix up" changes.
+- **DevPilot validates and applies exactly that patch,** atomically, or changes nothing.
+- **Every applied change can be reverted** by its `change_id` in the same server session, but only if nobody has edited the files since.
+
+Nothing is executed: no shell, tests, linters, formatters, package managers, build systems, hooks or repository scripts. Git is never used to apply or revert changes, and no LLM or GitHub call is made. `git_status` and `git_diff` simply see the edited working tree afterwards.
+
+### apply_patch
+
+Pass a standard unified diff (the format of `diff -u` and `git diff`):
+
+```diff
+--- a/src/utils.py
++++ b/src/utils.py
+@@ -3,4 +3,5 @@
+
+ def format_price(value: float) -> str:
+-    # TODO: support currencies other than USD
+-    return f"${value:,.2f}"
++    """Format a price in US dollars."""
++    # Other currencies are not supported yet.
++    return f"${value:,.2f}"
+```
+
+Result (from the MCP Inspector verification):
+
+```json
+{
+  "change_id": "chg_7b5a4ea39ddfed72",
+  "patch_sha256": "f82852a7b90760b8a2add2cae505f92d29d1d5d711103d22efe796ee67904d51",
+  "applied_at": "2026-09-28T09:26:09Z",
+  "files_changed": [
+    {"path": "src/utils.py", "change": "modified", "additions": 3, "deletions": 2,
+     "sha256_before": "d1d1e11c…", "sha256_after": "e1ca2a7a…"}
+  ],
+  "files_changed_count": 1, "additions": 3, "deletions": 2,
+  "reversible": true, "evicted_change_ids": []
+}
+```
+
+**Supported patch format:**
+
+| | |
+|---|---|
+| Modify a text file | `--- a/path` / `+++ b/path` with one or more `@@ -l,c +l,c @@` hunks |
+| Create a text file | `--- /dev/null` / `+++ b/path`, one hunk of `+` lines. Missing parent directories are created. |
+| Delete a text file | `--- a/path` / `+++ /dev/null`, whose `-` lines must be the **entire** current file |
+| Git headers | `diff --git a/p b/p`, `index …`, `new file mode 100644/100755` and `deleted file mode …` are accepted and checked for consistency |
+| Path prefixes | `a/` and `b/` are stripped; unprefixed paths (`--- README.md`) work too |
+| End-of-file | `\ No newline at end of file` is honoured |
+| Encoding | UTF-8 text only. Existing line endings (LF, CRLF or mixed), a UTF-8 BOM and a missing final newline are preserved. |
+| **Rejected** | binary patches, renames and copies, mode changes, quoted paths, empty-file or metadata-only sections, and any line that is not part of a unified diff (e-mail headers, prose, shell text) |
+
+Hunks must match the current file **exactly at the line numbers they state**. There is no offset search and no fuzz. A patch made against different or older content is rejected as stale instead of being forced in.
+
+### Validation pipeline
+
+Every step runs for **every file** in the patch before anything is written:
+
+1. **Size and format:** the patch must be non-empty, contain no null bytes, fit the byte limit, and parse strictly as a unified diff.
+2. **Resource limits:** files, hunks, added lines and deleted lines are counted against the limits below.
+3. **Target paths:**
+   - Each path goes through the existing `Workspace.resolve` boundary, which rejects absolute, drive, UNC and null-byte paths and `..` escapes.
+   - Writes add stricter rules on top:
+     - paths must be normalized and `/`-separated;
+     - no `:` (which would allow NTFS alternate streams);
+     - no Windows device names or trailing dots or spaces;
+     - no symlink or junction **anywhere on the path**, even one pointing back inside the workspace;
+     - the final path must resolve to its literal location.
+4. **Protected files:** see the next section.
+5. **Expected content:**
+   - Each target must be an existing UTF-8 text file within the size limit; for a creation, the path must not exist yet.
+   - Every context and removed line must match the file exactly.
+   - The new content of every file is computed in memory and checked against the result-size limit.
+6. **Atomic commit** (below). Only then is the change recorded in the registry.
+
+Errors name the file, hunk and line number but **never quote file or patch contents**, so a rejected patch cannot echo secrets back.
+
+### Atomicity
+
+- **Stage:** every new file content is fully written (and `fsync`ed) to a temporary `.devpilot-staging-*` file in the target's own directory.
+- **Swap:** targets are then replaced with atomic renames (`os.replace`). Deleted files are renamed aside rather than removed.
+- **Roll back:** if anything fails during either step, every completed step is undone in reverse order, temporary files are removed, and newly created directories are cleaned up. The error says whether the rollback succeeded. If a rollback itself ever failed, the error names the affected files.
+- **Tested:** failures are forced partway through multi-file patches (modify, delete, create and modify at once), both while staging and after two files were already swapped in. The tests check that every original file is byte-identical afterwards and that no temporary file is left behind.
+
+### Protected files
+
+A patch can never create, modify or delete:
+
+| Protected | Examples |
+|-----------|----------|
+| anything inside a `.git` directory, at any depth, in any letter case | `.git/config`, `.git/hooks/pre-commit`, `sub/.GIT/…` |
+| environment files | `.env`, `.env.local`, `config/.env.production`. **Exception:** `.env.example` stays editable |
+| private keys and certificates | `id_rsa*`, `id_dsa*`, `id_ecdsa*`, `id_ed25519*`, `*.pem`, `*.key`, `*.p12`, `*.pfx` |
+| credential and secret files | `credentials.json`, `secrets.*`, `*.secrets.*`, `.npmrc`, `.pypirc`, `.netrc` |
+
+This is the same secret-file list `investigate_repository` already excludes from evidence (Phase 6). For writes, only `.env.example` is exempt. Names are compared case-insensitively.
+
+### Resource limits
+
+| Limit | Value |
+|-------|-------|
+| Patch size | 256 KB (256,000 bytes) |
+| Files per patch | 20 |
+| Hunks per patch | 100 |
+| Added lines per patch | 2,000 |
+| Deleted lines per patch | 2,000 |
+| Size of an existing file the patch touches | 1 MB |
+| Size of any resulting file | 1 MB |
+| Changes kept for revert | the 50 most recent, up to 50 MB of original content |
+
+The constants are at the top of `devpilot_mcp/patching/changes.py`. Any limit is checked before a single byte is written.
+
+### Change registry and revert_patch
+
+- **What is recorded:** each successful `apply_patch` gets a random, unique `change_id` (`chg_` + 16 hex digits). The in-memory registry keeps:
+  - the patch SHA-256 and the time;
+  - each file's change type, path and line counts;
+  - its **original bytes**, and the **SHA-256 and size of the content DevPilot wrote**;
+  - any directories the patch created.
+- **When a change is forgotten:** changes are dropped when the server stops, when 50 newer changes exist, or when the 50 MB budget is exceeded. `evicted_change_ids` reports any change dropped by an apply, and `reversible: false` means the change could not be recorded at all.
+- **Revert pre-checks:** `revert_patch(change_id)` first checks **every** file of the change:
+  - modified and created files must still exist, with exactly the recorded size and SHA-256;
+  - deleted files must still be absent;
+  - every path must still pass the target rules above, for example no link swapped in.
+- **Refusal:** if any file differs, the whole revert is refused and **no file is touched**, so edits made after the patch are never overwritten. The error lists the changed paths, and the change stays revertable once they are restored.
+- **Restoring:**
+  - modified files get their original bytes back, byte for byte, including line endings and BOM;
+  - created files are removed, along with any directories the patch created that are now empty;
+  - deleted files are recreated.
+
+  This uses the same atomic staging, swap and rollback engine.
+- **After success:** the change is removed from the registry, so it can only be reverted once.
+
+```json
+{"change_id": "chg_fe201c7d50294e3a", "reverted": true,
+ "files_restored": [{"path": "src/utils.py", "action": "restored"}, {"path": "src/currency.py", "action": "removed"}],
+ "files_restored_count": 2}
+```
+
+### Limitations
+
+- **The registry lives in memory.** A restart, or a new server process, forgets every `change_id`. MCP Inspector's CLI mode starts a new server for each call, so to revert across processes, apply an explicit reverse patch. The web UI and normal MCP clients keep one session.
+- **Exact matching.** Hunks must match at their stated lines, so patches with wrong line numbers or counts are rejected, not guessed at.
+- **Unsupported operations:** renames (use a deletion plus a creation), mode changes, binary files, non-UTF-8 files, empty-file creation, quoted paths and patches in any other format.
+- **Revert checks hashes, not stored copies.** To keep memory bounded, the post-apply state is verified by SHA-256 and size rather than a stored copy of the new bytes. The original bytes needed for restoring are always stored.
+- **One server at a time.** Applies and reverts are serialized within one server. Two DevPilot servers editing the same workspace do not coordinate, although stale-patch and revert checks still refuse to overwrite changes they did not make.
+
 ## Security model
 
 All paths are relative to the workspace root. `Workspace.resolve()` in `devpilot_mcp/workspace.py` is the only way a tool turns a path into a filesystem location. It:
@@ -572,6 +726,9 @@ DevPilot-MCP/
 │   ├── config.py          # loads DEVPILOT_WORKSPACE from the environment / .env
 │   ├── workspace.py       # path sandboxing (the security boundary)
 │   ├── text_search.py     # shared file walking, text detection and line matching
+│   ├── patching/
+│   │   ├── unified_diff.py # strict unified-diff parser and in-memory hunk application
+│   │   └── changes.py     # validation, atomic commit/rollback, change registry, revert
 │   ├── github/
 │   │   ├── remote.py      # discovers owner/repo from the origin remote
 │   │   └── client.py      # read-only GitHub REST client (the only code that calls GitHub)
@@ -582,7 +739,8 @@ DevPilot-MCP/
 │       ├── repository.py  # analyze_repository
 │       ├── git.py         # git_status, git_log, git_diff, git_branch
 │       ├── github.py      # github_repository, github_issues, github_pull_requests
-│       └── investigation.py # investigate_repository
+│       ├── investigation.py # investigate_repository
+│       └── patch.py       # apply_patch, revert_patch (the only write tools)
 ├── tests/                 # unittest suite (sandboxing, tool logic, in-process MCP client)
 ├── workspace/
 │   └── sample_project/    # small demo repo to explore with the tools
@@ -639,7 +797,7 @@ In the page that opens:
 1. Set **Transport Type** to `STDIO`.
 2. Set **Command** to the full path of `.venv\Scripts\devpilot-mcp.exe`. On macOS/Linux use `.venv/bin/devpilot-mcp`. Leave **Arguments** empty.
 3. Optionally, add `DEVPILOT_WORKSPACE` under **Environment Variables** to point the server at a different directory.
-4. Click **Connect**, open the **Tools** tab, then click **List Tools**. The thirteen tools should appear.
+4. Click **Connect**, open the **Tools** tab, then click **List Tools**. The fifteen tools should appear.
 5. Try these calls:
    - `list_directory` with `path` = `sample_project`
    - `read_file` with `path` = `sample_project/src/inventory.py`
@@ -652,6 +810,7 @@ In the page that opens:
    - `read_file` with `path` = `../../secret.txt`. The call should be rejected with *"Path escapes the workspace root"*.
    - `git_status`, `git_log`, `git_diff` and `git_branch`. Against the default `./workspace` these return *"The workspace is not a Git repository"*, because `./workspace` is a plain folder. Set `DEVPILOT_WORKSPACE` to a repository root, e.g. this project's directory, and reconnect. Then try `git_log` with `limit` = `3`, and `git_diff` with and without `staged` = `true` after editing or staging a file.
    - `investigate_repository` with `query` = `Where is GitHub integration implemented?`. The result is evidence (ranked files with reasons, matching lines, excerpts, Git and GitHub context), not an answer. Try also `How is this project structured?`, `How are MCP tools registered?` and `How is workspace security implemented?`. A whitespace-only query is rejected.
+   - `apply_patch`, **against a disposable copy of a repository**. Paste a small unified diff, apply it, and check the file with `read_file` and `git_status`. Then call `revert_patch` with the returned `change_id` in the same session, and confirm the original content is back. Also try a stale patch (apply the same one twice) and a patch for `.env`; both are rejected and nothing changes.
    - `github_repository`, `github_issues` with `limit` = `5`, and `github_pull_requests` with `limit` = `5`. Like the Git tools, these need `DEVPILOT_WORKSPACE` to be a repository root whose `origin` points to github.com, e.g. this project's directory. A repository with no issues or pull requests returns empty lists. Also try `state` = `merged` or `limit` = `51`; both are rejected.
    - `analyze_repository` with no arguments. Against the sample project, expect 4 files (`Python: 3`, `Markdown: 1`), the test directory `sample_project/tests` and empty `heuristics`, because the sample has no manifests. To analyze a real repository, set `DEVPILOT_WORKSPACE` in step 3 to that repository's path and reconnect.
 
@@ -672,7 +831,10 @@ npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVP
 npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-github-clone --method tools/call --tool-name github_issues --tool-arg state=all limit=5
 npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-github-clone --method tools/call --tool-name github_pull_requests --tool-arg limit=5
 npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-repo --method tools/call --tool-name investigate_repository --tool-arg "query=How is authentication implemented?"
+npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-disposable-copy --method tools/call --tool-name apply_patch --tool-arg "patch=\"--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-# Old title\n+# New title\n\""
 ```
+
+The Inspector CLI mangles raw multi-line values, so pass a patch as a **JSON-encoded string** (with `\n` escapes), as above. Each Inspector CLI call starts a new server, so `revert_patch` from a separate CLI call finds no change. Use the web UI, or any client that keeps one session, to apply and revert.
 
 Launch the server through the `devpilot-mcp` executable rather than `python -m devpilot_mcp`. The Inspector CLI parses flags such as `-m` and `-e` itself, so they never reach the server.
 
@@ -684,8 +846,10 @@ python -m unittest discover -s tests -t . -v
 
 The suite builds a temporary workspace with a `secret.txt` just outside it. It checks the path-escape attempts listed under [Security model](#security-model), every tool's normal and error cases, and full round trips through an in-process MCP client. The Git tests need `git` on `PATH`. They build throwaway repositories with an isolated Git config, and are skipped if Git is not installed. The GitHub tests **never contact GitHub**. Tool and client tests use a fake transport, and the HTTP transport is tested against local `127.0.0.1` servers. The investigation tests use a fake GitHub client, real throwaway Git repositories and hashes of every file before and after. On Windows the symlink-escape test is skipped unless Developer Mode is on, because creating symlinks requires it.
 
-Current result: **257 tests, 255 passed, 2 skipped** (the two Windows symlink tests), 0 failed.
+The patch tests attempt the full set of malicious patches (traversal, absolute, drive and UNC paths, symlinks and Windows junctions, protected files, unexpected metadata, oversized and malformed patches). Each one takes a byte-level snapshot before and after.
+
+Current result: **301 tests, 298 passed, 3 skipped** (Windows symlink tests that need Developer Mode), 0 failed.
 
 ## Roadmap
 
-Phase 1 added read-only filesystem access, Phase 2 added code search, Phase 3 added repository analysis, Phase 4 added read-only Git intelligence, Phase 5 added read-only GitHub integration and Phase 6 added evidence gathering for developer investigation. DevPilot remains read-only: it gathers evidence and never edits code. Later phases will be designed separately.
+Phase 1 added read-only filesystem access, Phase 2 added code search, Phase 3 added repository analysis, Phase 4 added read-only Git intelligence, Phase 5 added read-only GitHub integration, Phase 6 added evidence gathering for developer investigation, and Phase 7 added controlled code modification. In Phase 7 the caller supplies an explicit patch; DevPilot validates it, applies it atomically, tracks it and can revert it. DevPilot still never decides what to change and never runs code. Later phases will be designed separately.

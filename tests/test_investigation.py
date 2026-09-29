@@ -523,7 +523,7 @@ class InvestigationMcpTests(GitEvidenceTestCase, unittest.IsolatedAsyncioTestCas
     async def test_registration_and_schema(self) -> None:
         async with Client(create_server(self.workspace, github_client=self.client)) as client:
             tools = {t.name: t for t in (await client.list_tools()).tools}
-        self.assertEqual(len(tools), 13)
+        self.assertEqual(len(tools), 15)
         tool = tools["investigate_repository"]
         schema = tool.input_schema
         self.assertEqual(set(schema["properties"]), {"query"})
