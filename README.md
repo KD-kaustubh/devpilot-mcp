@@ -10,7 +10,8 @@ It is being built in phases:
 - **Phase 4: Git intelligence.** `git_status`, `git_log`, `git_diff` and `git_branch` give read-only, structured Git information.
 - **Phase 5: GitHub integration.** `github_repository`, `github_issues` and `github_pull_requests` read objective GitHub facts for the repository behind the workspace's `origin` remote.
 - **Phase 6: developer investigation.** `investigate_repository(query)` gathers ranked, bounded evidence for a developer question: relevant files, matching lines, source excerpts, and Git and GitHub context. The consuming AI then reasons over that evidence.
-- **Phase 7 (this release): controlled code modification.** `apply_patch` applies an explicit unified diff **supplied by the caller**, validated in full and applied atomically, and `revert_patch` undoes it by `change_id`. DevPilot never generates or chooses changes itself.
+- **Phase 7: controlled code modification.** `apply_patch` applies an explicit unified diff **supplied by the caller**, validated in full and applied atomically, and `revert_patch` undoes it by `change_id`. DevPilot never generates or chooses changes itself.
+- **Phase 8 (this release): testing and validation.** `get_test_commands` detects the repository's test framework without running anything, `run_tests` runs one of two fixed test commands, and `validate_repository` reports objective checks. **Arbitrary shell commands are not supported.**
 
 The server never touches anything outside one configured workspace directory.
 
@@ -32,9 +33,17 @@ The server never touches anything outside one configured workspace directory.
 | `investigate_repository` | `query` (1–500 characters) | Structured **evidence** for a developer question, not an answer: search terms, repository facts, ranked relevant files and directories with reasons, matching lines, source excerpts, and Git and GitHub context. See [Developer investigation](#developer-investigation). |
 | `apply_patch` ✏️ | `patch`: a unified diff, up to 256 KB | **Writes files.** Validates the whole caller-supplied patch, then applies it atomically. Returns a `change_id`, the patch SHA-256, and per-file change type, line counts and SHA-256 before/after. See [Controlled code modification](#controlled-code-modification). |
 | `revert_patch` ✏️ | `change_id` from `apply_patch` | **Writes files.** Restores the exact previous bytes of every file in that change, or refuses if any of them changed since. |
+| `get_test_commands` | none | The detected test frameworks (pytest, unittest), each with its fixed command, confidence and evidence, plus `primary`. **Runs nothing.** See [Testing and validation](#testing-and-validation). |
+| `run_tests` ▶️ | optional `framework` (`pytest`/`unittest`, must have been detected), `timeout_seconds` (1–600, default 120) | **Executes repository test code** with the detected fixed command. Returns status, exit code, parsed counts, bounded stdout/stderr and the files the run changed. |
+| `validate_repository` ▶️ | `run_tests` (default `false`), `timeout_seconds` | A deterministic report of facts, checks, warnings, failures and skipped checks: repository analysis, Git state, test discovery, optional test execution and Python syntax. |
 | `github_pull_requests` | `state` (`open`/`closed`/`all`, default `open`), `limit` (1–50, default 10) | Pull requests, newest first: number, title, state, draft, author, timestamps including `merged_at`, source and target branch and repository, labels, assignees, requested reviewers and teams, and URL. `has_more`. |
 
-Every tool returns **structured output**, and its JSON schema is published to the client. Every tool is marked `readOnlyHint: true` except the two Phase 7 write tools, `apply_patch` and `revert_patch`, which are marked `readOnlyHint: false` and `destructiveHint: true`. An expected failure, such as a missing file or a rejected path, comes back as a tool error (`isError: true`) with a clear message instead of crashing the server.
+Every tool returns **structured output**, and its JSON schema is published to the client. Every tool is marked `readOnlyHint: true` except four:
+
+- the Phase 7 write tools `apply_patch` and `revert_patch`;
+- the Phase 8 tools `run_tests` and `validate_repository`, which can execute the repository's test code.
+
+These four are marked `readOnlyHint: false` and `destructiveHint: true`. An expected failure, such as a missing file or a rejected path, comes back as a tool error (`isError: true`) with a clear message instead of crashing the server.
 
 ## Code search
 
@@ -706,6 +715,179 @@ The constants are at the top of `devpilot_mcp/patching/changes.py`. Any limit is
 - **Revert checks hashes, not stored copies.** To keep memory bounded, the post-apply state is verified by SHA-256 and size rather than a stored copy of the new bytes. The original bytes needed for restoring are always stored.
 - **One server at a time.** Applies and reverts are serialized within one server. Two DevPilot servers editing the same workspace do not coordinate, although stale-patch and revert checks still refuse to overwrite changes they did not make.
 
+## Testing and validation
+
+Phase 8 adds objective validation evidence to the loop:
+
+**repository understanding → investigation → controlled patch → testing / validation → structured evidence**
+
+DevPilot runs the repository's tests in a tightly controlled way and reports what happened. It does not interpret results, fix failures, retry, score the repository or call an LLM. The consuming AI reasons over the evidence.
+
+> **Arbitrary shell commands are not supported.** No tool accepts a command, executable, argument list or shell string. Only two fixed test commands exist, and DevPilot chooses between them from repository evidence.
+
+### Supported frameworks
+
+Python only, with exactly these commands. `python` means the selected interpreter, described under [Security restrictions](#security-restrictions).
+
+| Framework | Command |
+|-----------|---------|
+| pytest | `python -m pytest -p no:cacheprovider` (the cache plugin is disabled so DevPilot writes no `.pytest_cache`) |
+| unittest | `python -m unittest`, or `python -m unittest discover -s <dir>` when the tests live in a directory without `__init__.py`. Root discovery cannot reach such directories on Python 3.11+, so `<dir>` is taken from the repository's own layout and validated before use. |
+
+### get_test_commands
+
+This tool inspects files only. It never imports or runs anything.
+
+| Evidence | Confidence |
+|----------|------------|
+| `pytest.ini`, `pyproject.toml [tool.pytest…]`, `setup.cfg [tool:pytest]`, `tox.ini [pytest]`, a `conftest.py` at the root or in a test directory | pytest **high** |
+| pytest declared in `pyproject.toml` or `requirements*.txt`, test files that `import pytest`, module-level `def test_…` functions, or tox `testenv` commands that mention pytest (tox itself is never run) | pytest **medium** |
+| `unittest.TestCase` classes in `test*.py` files | unittest **high** |
+| `TestCase` classes in files unittest's default `test*.py` pattern misses, or test files that only `import unittest` | unittest **low** |
+
+- **Primary framework:** highest confidence wins; on a tie pytest is preferred, because it also runs unittest-style tests.
+- **Warnings:**
+  - conflicts, such as both frameworks detected;
+  - test files that the chosen command would miss;
+  - malformed `pyproject.toml`, `setup.cfg` or `tox.ini` (reported, then ignored);
+  - a framework not installed in the interpreter (`runner_available: false`).
+- **No evidence:** with nothing detected, `detected` is empty and a warning says so. Nothing is guessed.
+
+On DevPilot itself:
+
+```json
+{
+  "detected": [
+    {"framework": "unittest", "command": ["python", "-m", "unittest"], "confidence": "high",
+     "evidence": ["unittest.TestCase classes in test*.py files", "test files import unittest", "tests/", "workspace/sample_project/tests/"],
+     "runner_available": true},
+    {"framework": "pytest", "command": ["python", "-m", "pytest", "-p", "no:cacheprovider"], "confidence": "medium",
+     "evidence": ["module-level test functions (pytest style)", "tests/", "workspace/sample_project/tests/"], "runner_available": false}
+  ],
+  "primary": {"framework": "unittest", "…": "…"},
+  "test_file_count": 11, "test_directories": ["tests", "workspace/sample_project/tests"],
+  "interpreter": {"source": "devpilot", "valid": true, "python_version": "3.12.10", "problem": null},
+  "warnings": ["1 test file(s) define module-level test functions, which only pytest runs.",
+               "Both pytest and unittest evidence was found; 'unittest' is primary (high confidence). pytest can also run unittest-style tests."]
+}
+```
+
+### run_tests
+
+- **Which command runs:** the primary framework's command, or the one named by `framework`, which must also have been **detected**. Anything else, such as `"; whoami"` or `"cmd /c …"`, is rejected before a process starts.
+- **Timeout:** `timeout_seconds` is 1–600 (default 120). When it runs out, the test process is killed and the status is `timed_out`.
+- **Result:**
+
+```json
+{
+  "framework": "unittest", "command": ["python", "-m", "unittest", "discover", "-s", "tests"],
+  "status": "passed", "exit_code": 0,
+  "passed": 2, "failed": 0, "errors": 0, "skipped": 1, "total": 3, "other_counts": {},
+  "duration_seconds": 0.109, "timed_out": false, "timeout_seconds": 60,
+  "stdout": "", "stderr": ".s.\r\n----------------------------------------------------------------------\r\nRan 3 tests in 0.000s\r\n\r\nOK (skipped=1)\r\n",
+  "stdout_bytes": 0, "stderr_bytes": 118, "output_truncated": false,
+  "removed_environment_variables": ["GITHUB_TOKEN", "PYTHONSTARTUP"], "redactions": 0,
+  "side_effects": {"checked": true, "complete": true, "files_created": [], "files_modified": [], "files_deleted": [],
+                   "total_changes": 0, "git_state_changed": false},
+  "warnings": []
+}
+```
+
+The example above comes from the Phase 8 verification run on Windows. `removed_environment_variables` depends on the server's own environment and is abridged here.
+
+- **Status values:**
+  - `passed`, `failed` (failures or errors);
+  - `no_tests` (nothing collected; exit code 5);
+  - `timed_out`;
+  - `error` (for example, the framework isn't installed, or a usage error).
+- **Counts:** parsed from pytest's summary line or unittest's `Ran N tests … OK/FAILED (…)` lines. When there is no summary, the counts are `null`, never invented.
+- **Output:** stdout and stderr are returned separately.
+
+### validate_repository
+
+The checks always run in this order:
+
+| Check | What it does | Statuses |
+|-------|--------------|----------|
+| `repository_analysis` | `analyze_repository` facts (Phase 3) | passed / error |
+| `git_working_tree` | `git_status` (Phase 4, read-only): clean or dirty | passed (clean) / **warning** (dirty) / skipped (not a Git repository root) |
+| `test_discovery` | `get_test_commands` | passed / warning (nothing detected) |
+| `test_execution` | the primary command via `run_tests`, **only when `run_tests` is true** | skipped (the default) / passed / failed / warning (`no_tests`) |
+| `python_syntax` | every `.py`/`.pyi` file is **parsed** with `compile(..., ast.PyCF_ONLY_AST)`. Nothing is executed or imported. | passed / failed / skipped (no Python files) |
+
+- **Default:** executes no code at all.
+- **Report sections:** `repository`, `git`, `tests` (`discovery`, `execution_requested`, `executed`, `result`), `syntax`, `checks`, `warnings`, `failures` (the failed checks), `skipped` (the skipped checks) and `complete` (every check ran to completion).
+- **No verdict:** there is no score, ranking or good/bad judgement.
+- **Syntax only:** syntax validation finds syntax errors, including indentation and tab errors, and reports `SyntaxWarning`s. It does *not* find import, runtime or type errors. The grammar is that of the Python running DevPilot.
+
+A failing example (a failing assertion and a syntax error in a disposable repository):
+
+```json
+"checks": [
+  {"name": "repository_analysis", "status": "passed", "detail": "4 files analyzed."},
+  {"name": "git_working_tree", "status": "warning", "detail": "Working tree has changes: 0 staged, 1 unstaged, 1 untracked."},
+  {"name": "test_discovery", "status": "passed", "detail": "Primary: unittest (high confidence)."},
+  {"name": "test_execution", "status": "failed", "detail": "unittest: failed; exit code 1; passed=1, failed=1, errors=0, skipped=1."},
+  {"name": "python_syntax", "status": "failed", "detail": "1 file(s) failed to parse (first: src/broken.py:1: SyntaxError: invalid syntax)."}
+],
+"failures": ["test_execution: …", "python_syntax: …"]
+```
+
+### Security restrictions
+
+- **No caller-supplied commands.** `run_tests` takes only an enum and an integer. Extra MCP arguments such as `command`, `executable`, `shell`, `cwd` or `env` are dropped by the server.
+- **No commands from repository config.** Configuration is inspected as evidence only. The one derived argument, the `discover -s` directory, must be an existing directory inside the workspace that cannot be read as an option. Before anything runs, the argument vector is checked against the fixed command shapes.
+- **Controlled interpreter.** The executable is an absolute path, so it is never looked up on `PATH` or in the workspace:
+  - by default, the Python running DevPilot (`sys.executable`);
+  - optionally, `DEVPILOT_TEST_PYTHON`, set by the *server operator* (see `.env.example`). It must be absolute, exist, and be named `python`/`python.exe`.
+
+  Neither the MCP caller nor the repository can choose it.
+- **No shell.** `subprocess` runs with an argument list, `shell=False`, stdin closed, and the working directory set to the validated workspace root. No `cmd.exe`, PowerShell, `bash` or `sh` is involved, and Unix tools such as `which`, `grep` or `timeout` are never used.
+- **Sanitized environment.**
+  - Removed: interpreter and pytest injection variables (`PYTHONPATH`, `PYTHONSTARTUP`, `PYTHONHOME`, `PYTEST_ADDOPTS`, `PYTEST_PLUGINS`, …), every `GIT_*` variable, and every variable whose name looks secret (`*TOKEN*`, `*SECRET*`, `*PASSWORD*`, `*API_KEY*`, `*CREDENTIAL*`, `*AUTH*`, …).
+  - Test code therefore cannot read `GITHUB_TOKEN`. The names (never the values) of removed variables are reported.
+  - Set: `PYTHONDONTWRITEBYTECODE=1`, so no `__pycache__` is written, and colour is turned off.
+- **Redacted output.**
+  - Values of removed secret variables and GitHub-token or private-key patterns become `[REDACTED]`.
+  - The workspace path and interpreter path are shown as `<workspace>` and `<python>`.
+- **One run at a time** per server. A concurrent request is refused.
+
+### Timeout and output limits
+
+| Limit | Value |
+|-------|-------|
+| `timeout_seconds` | 1–600, default 120; the process is killed when it is exceeded |
+| Output kept per stream | the first 8 KB and the last 24 KB (summaries are printed last), with an `… [N bytes omitted] …` marker and `output_truncated: true` |
+| Side-effect snapshot | up to 20,000 files (`side_effects.complete`) and up to 50 listed paths per category |
+| Syntax check | up to 5,000 files of at most 1 MB each; up to 50 errors and 50 warnings listed |
+| Detection | up to 50 test files inspected (256 KB each) and 10 evidence items per framework |
+
+### Side effects
+
+**Running tests means running repository code.** Test code, `conftest.py` and the repository's own pytest configuration run with the permissions of the DevPilot process. They can read and write files and use the network.
+
+- **What DevPilot itself does:** it never intentionally writes files, changes Git or uses the network while running tests. It disables `.pytest_cache` and bytecode caches.
+- **What it reports:** before and after each run it snapshots file sizes and modification times, skipping `.git`, `.venv`, `node_modules` and cache folders, and captures `git status`. Anything the tests created, modified or deleted is reported in `side_effects`, with a warning.
+- **What it never does:** revert those changes, run tests with elevated privileges, or offer any way to run a different command.
+
+Only run tests of repositories whose test code you are willing to execute.
+
+### Windows considerations
+
+- **Absolute interpreter path.** Windows' process launcher also searches the current directory, so a bare `python` could pick up a `python.exe` planted in the repository. DevPilot always launches the interpreter by absolute path.
+- **No console windows.** Processes start with `CREATE_NO_WINDOW`. Output is read by background threads, so a chatty test cannot deadlock a pipe.
+- **unittest discovery.** It only descends into packages (Python 3.11+), which is why a `tests/` folder without `__init__.py` gets `discover -s tests`.
+- **Test runs are verified on Windows:** DevPilot ran its own 349-test suite through `validate_repository(run_tests=true)` over MCP stdio, with 345 passed, 4 skipped, no side effects, and the repository and `.git` byte-identical afterwards.
+
+### Limitations
+
+- **Python only:** pytest and unittest. No tox, nox, make or package-manager scripts are run, even when configured.
+- **Interpreter and dependencies.** Tests run with DevPilot's own interpreter unless `DEVPILOT_TEST_PYTHON` is set. A project whose dependencies (including pytest) are not installed there reports `status: "error"` with a warning.
+- **Timeouts kill one process.** On timeout, only the test process itself is killed. Processes the tests started themselves may outlive it.
+- **Partial isolation.** Side-effect detection uses sizes and timestamps, not content hashes, and skips `.git`, dependency and cache folders. There is no sandbox, network isolation or filesystem isolation beyond the sanitized environment.
+- **Counts come from summary text.** Heavily customised pytest output can leave counts `null`.
+- **Syntax is checked with DevPilot's Python grammar**, so code for a newer Python may be reported as a syntax error.
+
 ## Security model
 
 All paths are relative to the workspace root. `Workspace.resolve()` in `devpilot_mcp/workspace.py` is the only way a tool turns a path into a filesystem location. It:
@@ -726,6 +908,10 @@ DevPilot-MCP/
 │   ├── config.py          # loads DEVPILOT_WORKSPACE from the environment / .env
 │   ├── workspace.py       # path sandboxing (the security boundary)
 │   ├── text_search.py     # shared file walking, text detection and line matching
+│   ├── testing/
+│   │   ├── detection.py   # test-framework detection and the fixed commands (nothing executed)
+│   │   ├── runner.py      # the controlled, shell-free, bounded test execution
+│   │   └── syntax.py      # Python syntax validation by parsing only
 │   ├── patching/
 │   │   ├── unified_diff.py # strict unified-diff parser and in-memory hunk application
 │   │   └── changes.py     # validation, atomic commit/rollback, change registry, revert
@@ -740,7 +926,8 @@ DevPilot-MCP/
 │       ├── git.py         # git_status, git_log, git_diff, git_branch
 │       ├── github.py      # github_repository, github_issues, github_pull_requests
 │       ├── investigation.py # investigate_repository
-│       └── patch.py       # apply_patch, revert_patch (the only write tools)
+│       ├── patch.py       # apply_patch, revert_patch (the only write tools)
+│       └── testing.py     # get_test_commands, run_tests, validate_repository
 ├── tests/                 # unittest suite (sandboxing, tool logic, in-process MCP client)
 ├── workspace/
 │   └── sample_project/    # small demo repo to explore with the tools
@@ -766,6 +953,7 @@ copy .env.example .env           # macOS/Linux: cp .env.example .env
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `GITHUB_TOKEN` | *(unset)* | Optional fine-grained token with read-only Metadata, Issues and Pull requests permissions, for private repositories or a higher rate limit. Keep it in `.env` (git-ignored) or the environment; never commit it. |
+| `DEVPILOT_TEST_PYTHON` | *(unset)* | Optional **absolute** path to the Python interpreter `run_tests` uses, e.g. a project's own venv `python.exe`. Default: the interpreter running DevPilot. Set only by the server operator; no tool argument can change it. |
 | `DEVPILOT_WORKSPACE` | `./workspace` | The directory the tools can access. A relative path is resolved against the **project root**, not the current directory, so the server behaves the same whichever directory a client launches it from. |
 
 If the directory doesn't exist, the server exits at startup with an error on stderr.
@@ -797,7 +985,7 @@ In the page that opens:
 1. Set **Transport Type** to `STDIO`.
 2. Set **Command** to the full path of `.venv\Scripts\devpilot-mcp.exe`. On macOS/Linux use `.venv/bin/devpilot-mcp`. Leave **Arguments** empty.
 3. Optionally, add `DEVPILOT_WORKSPACE` under **Environment Variables** to point the server at a different directory.
-4. Click **Connect**, open the **Tools** tab, then click **List Tools**. The fifteen tools should appear.
+4. Click **Connect**, open the **Tools** tab, then click **List Tools**. The eighteen tools should appear.
 5. Try these calls:
    - `list_directory` with `path` = `sample_project`
    - `read_file` with `path` = `sample_project/src/inventory.py`
@@ -811,6 +999,7 @@ In the page that opens:
    - `git_status`, `git_log`, `git_diff` and `git_branch`. Against the default `./workspace` these return *"The workspace is not a Git repository"*, because `./workspace` is a plain folder. Set `DEVPILOT_WORKSPACE` to a repository root, e.g. this project's directory, and reconnect. Then try `git_log` with `limit` = `3`, and `git_diff` with and without `staged` = `true` after editing or staging a file.
    - `investigate_repository` with `query` = `Where is GitHub integration implemented?`. The result is evidence (ranked files with reasons, matching lines, excerpts, Git and GitHub context), not an answer. Try also `How is this project structured?`, `How are MCP tools registered?` and `How is workspace security implemented?`. A whitespace-only query is rejected.
    - `apply_patch`, **against a disposable copy of a repository**. Paste a small unified diff, apply it, and check the file with `read_file` and `git_status`. Then call `revert_patch` with the returned `change_id` in the same session, and confirm the original content is back. Also try a stale patch (apply the same one twice) and a patch for `.env`; both are rejected and nothing changes.
+   - `get_test_commands`. Nothing is run. Then `validate_repository` with the defaults: `test_execution` is `skipped`. Then, **against a repository whose tests you are willing to execute**, `run_tests` with `timeout_seconds` = `60`, and `validate_repository` with `run_tests` = `true`. Try `framework` = `; whoami`; the call is rejected.
    - `github_repository`, `github_issues` with `limit` = `5`, and `github_pull_requests` with `limit` = `5`. Like the Git tools, these need `DEVPILOT_WORKSPACE` to be a repository root whose `origin` points to github.com, e.g. this project's directory. A repository with no issues or pull requests returns empty lists. Also try `state` = `merged` or `limit` = `51`; both are rejected.
    - `analyze_repository` with no arguments. Against the sample project, expect 4 files (`Python: 3`, `Markdown: 1`), the test directory `sample_project/tests` and empty `heuristics`, because the sample has no manifests. To analyze a real repository, set `DEVPILOT_WORKSPACE` in step 3 to that repository's path and reconnect.
 
@@ -832,6 +1021,9 @@ npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVP
 npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-github-clone --method tools/call --tool-name github_pull_requests --tool-arg limit=5
 npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-repo --method tools/call --tool-name investigate_repository --tool-arg "query=How is authentication implemented?"
 npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-disposable-copy --method tools/call --tool-name apply_patch --tool-arg "patch=\"--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-# Old title\n+# New title\n\""
+npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-repo --method tools/call --tool-name get_test_commands
+npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-repo --method tools/call --tool-name run_tests --tool-arg timeout_seconds=60
+npx @modelcontextprotocol/inspector --cli .venv\Scripts\devpilot-mcp.exe -e DEVPILOT_WORKSPACE=D:/path/to/a-repo --method tools/call --tool-name validate_repository --tool-arg run_tests=true
 ```
 
 The Inspector CLI mangles raw multi-line values, so pass a patch as a **JSON-encoded string** (with `\n` escapes), as above. Each Inspector CLI call starts a new server, so `revert_patch` from a separate CLI call finds no change. Use the web UI, or any client that keeps one session, to apply and revert.
@@ -848,8 +1040,10 @@ The suite builds a temporary workspace with a `secret.txt` just outside it. It c
 
 The patch tests attempt the full set of malicious patches (traversal, absolute, drive and UNC paths, symlinks and Windows junctions, protected files, unexpected metadata, oversized and malformed patches). Each one takes a byte-level snapshot before and after.
 
-Current result: **301 tests, 298 passed, 3 skipped** (Windows symlink tests that need Developer Mode), 0 failed.
+The Phase 8 tests run real unittest suites in throwaway projects, covering passing, failing, skipped, timed-out, truncated, side-effecting and no-tests runs. They also try shell and command injection payloads (`; whoami`, `&& powershell …`, `cmd /c …`, `../../…`, absolute and UNC paths, tampered argument vectors) and check that no process starts, and that the environment and output leak no secrets.
+
+Current result: **349 tests, 345 passed, 4 skipped, 0 failed.** The skips are the three Windows symlink tests that need Developer Mode, and the real-pytest test, because pytest is not installed in DevPilot's environment. pytest behaviour is still covered by parsing recorded output and by a real "pytest not installed" run.
 
 ## Roadmap
 
-Phase 1 added read-only filesystem access, Phase 2 added code search, Phase 3 added repository analysis, Phase 4 added read-only Git intelligence, Phase 5 added read-only GitHub integration, Phase 6 added evidence gathering for developer investigation, and Phase 7 added controlled code modification. In Phase 7 the caller supplies an explicit patch; DevPilot validates it, applies it atomically, tracks it and can revert it. DevPilot still never decides what to change and never runs code. Later phases will be designed separately.
+Phase 1 added read-only filesystem access, Phase 2 added code search, Phase 3 added repository analysis, Phase 4 added read-only Git intelligence, Phase 5 added read-only GitHub integration, Phase 6 added evidence gathering for developer investigation, Phase 7 added controlled code modification, and Phase 8 added testing and validation. In Phase 7 the caller supplies an explicit patch; DevPilot validates it, applies it atomically, tracks it and can revert it. DevPilot still never decides what to change. The only code it runs is the repository's tests, through two fixed commands and only on request; arbitrary commands are not supported. Later phases will be designed separately.

@@ -17,9 +17,10 @@ class ServerTests(WorkspaceTestCase, unittest.IsolatedAsyncioTestCase):
             {"list_directory", "read_file", "search_files", "search_code", "analyze_repository",
              "git_status", "git_log", "git_diff", "git_branch",
              "github_repository", "github_issues", "github_pull_requests", "investigate_repository",
-             "apply_patch", "revert_patch"},
+             "apply_patch", "revert_patch", "get_test_commands", "run_tests", "validate_repository"},
         )  # fmt: skip
-        write_tools = {"apply_patch", "revert_patch"}  # Phase 7: the only tools that modify files
+        # Phase 7 writes files; Phase 8 run_tests (and validate_repository on request) executes test code.
+        write_tools = {"apply_patch", "revert_patch", "run_tests", "validate_repository"}
         for name, tool in tools.items():
             if name in write_tools:
                 self.assertFalse(tool.annotations.read_only_hint)

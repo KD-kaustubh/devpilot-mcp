@@ -9,11 +9,11 @@ from mcp.server.mcpserver import MCPServer
 from devpilot_mcp import __version__
 from devpilot_mcp.config import ConfigError, load_settings
 from devpilot_mcp.github.client import GitHubClient
-from devpilot_mcp.tools import code_search, filesystem, git, github, investigation, patch, repository
+from devpilot_mcp.tools import code_search, filesystem, git, github, investigation, patch, repository, testing
 from devpilot_mcp.workspace import Workspace
 
 SERVER_INSTRUCTIONS = (
-    "DevPilot gives access to a single workspace directory; every tool is read-only except apply_patch and revert_patch. "
+    "DevPilot gives access to a single workspace directory; every tool is read-only except apply_patch and revert_patch (which write files) and run_tests and validate_repository (which can execute the repository's tests). "
     "All paths are relative to the workspace root; absolute paths and '..' escapes are rejected. "
     "Start with analyze_repository() for an overview, list_directory('.') to explore, search_code to locate "
     "code (search_files for any text file), and read_file to inspect it. "
@@ -21,7 +21,8 @@ SERVER_INSTRUCTIONS = (
     "github_repository, github_issues and github_pull_requests read GitHub data for the repository behind its origin remote. "
     "investigate_repository(query) gathers ranked evidence (files, matching lines, excerpts, Git and GitHub context) "
     "for a developer question; it does not answer it, so reason over the evidence yourself. "
-    "apply_patch and revert_patch are the only write tools: apply_patch applies an explicit unified diff you supply (validated, atomic, reversible by change_id); DevPilot never generates changes itself."
+    "apply_patch and revert_patch are the only write tools: apply_patch applies an explicit unified diff you supply (validated, atomic, reversible by change_id); DevPilot never generates changes itself. "
+    "get_test_commands detects the supported test command (pytest or unittest) without running anything; run_tests runs it; validate_repository reports objective checks and runs tests only when asked. No arbitrary commands can be run."
 )
 
 
@@ -35,6 +36,7 @@ def create_server(workspace: Workspace, *, github_client: GitHubClient | None = 
     github.register(server, workspace, github_client)
     investigation.register(server, workspace, github_client)
     patch.register(server, workspace)
+    testing.register(server, workspace)
     return server
 
 

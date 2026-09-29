@@ -620,7 +620,7 @@ class PatchMcpTests(PatchTestCase, unittest.IsolatedAsyncioTestCase):
     async def test_registration_and_annotations(self) -> None:
         async with Client(create_server(self.workspace)) as client:
             tools = {t.name: t for t in (await client.list_tools()).tools}
-        self.assertEqual(len(tools), 15)
+        self.assertEqual(len(tools), 18)
         apply_tool, revert_tool = tools["apply_patch"], tools["revert_patch"]
         self.assertEqual(apply_tool.input_schema["required"], ["patch"])
         self.assertEqual(set(apply_tool.input_schema["properties"]), {"patch"})
@@ -632,7 +632,7 @@ class PatchMcpTests(PatchTestCase, unittest.IsolatedAsyncioTestCase):
             self.assertTrue(tool.annotations.destructive_hint)
             self.assertIn("YOU supply" if tool is apply_tool else "apply_patch", tool.description)
         for name, tool in tools.items():  # every other tool is still read-only
-            if name not in ("apply_patch", "revert_patch"):
+            if name not in ("apply_patch", "revert_patch", "run_tests", "validate_repository"):
                 self.assertTrue(tool.annotations.read_only_hint, name)
 
     async def test_round_trip_through_one_server(self) -> None:
