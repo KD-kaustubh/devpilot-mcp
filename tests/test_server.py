@@ -76,6 +76,23 @@ class ServerTests(WorkspaceTestCase, unittest.IsolatedAsyncioTestCase):
             self.assertTrue(result.is_error)
             self.assertNotIn("TOP SECRET", result.content[0].text)
 
+    async def test_secret_files_never_reach_the_client(self) -> None:
+        secret_value = "sk-live-NEVER-LEAK-ME"
+        (self.workspace.root / ".env").write_text(f"API_KEY={secret_value}\n", encoding="utf-8")
+        async with Client(create_server(self.workspace)) as client:
+            calls = [
+                await client.call_tool("read_file", {"path": ".env"}),
+                await client.call_tool("search_files", {"query": "NEVER-LEAK"}),  # the query itself is echoed back
+                await client.call_tool("search_code", {"query": "api_key"}),
+                await client.call_tool("search_files", {"query": "API_KEY", "path": ".env"}),
+            ]
+        self.assertTrue(calls[0].is_error)
+        self.assertIn("never returns its contents", calls[0].content[0].text)
+        self.assertEqual((calls[1].structured_content["matches"], calls[2].structured_content["matches"]), ([], []))
+        self.assertTrue(calls[3].is_error)
+        for result in calls:
+            self.assertNotIn(secret_value, result.content[0].text)
+
     async def test_successful_calls_return_structured_content(self) -> None:
         async with Client(create_server(self.workspace)) as client:
             listing = await client.call_tool("list_directory", {"path": "."})

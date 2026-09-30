@@ -30,13 +30,14 @@ Detailed behaviour, output examples and limits for each tool group.
 ## Filesystem tools
 
 - **`list_directory(path=".")`**: the directory's entries (`name`, `path`, `type`, `size_bytes`), directories first. `""` also means the workspace root. Capped at 500 entries, with a `truncated` flag and `total_entries`.
-- **`read_file(path)`**: `content`, `size_bytes` and `line_count`. Binary files, non-UTF-8 files and files over 1 MB are rejected.
-- **`search_files(query, path=".")`**: case-insensitive substring matches (`path`, `line_number`, `line`), plus `files_with_matches`, `files_searched` and `truncated`. Capped at 100 matches. Binary files, files over 1 MB and dependency/VCS folders (`.git`, `node_modules`, `.venv`, …) are skipped.
+- **`read_file(path)`**: `content`, `size_bytes` and `line_count`. Binary files, non-UTF-8 files and files over 1 MB are rejected, and so are `.git` internals and likely secret files (see [Secret files and .git](SECURITY.md#secret-files-and-git)).
+- **`search_files(query, path=".")`**: case-insensitive substring matches (`path`, `line_number`, `line`), plus `files_with_matches`, `files_searched` and `truncated`. Capped at 100 matches. Binary files, files over 1 MB, likely secret files and dependency/VCS folders (`.git`, `node_modules`, `.venv`, …) are skipped, and symlinked or junction directories are never entered.
 
 `search_files` searches the whole workspace by default. The optional `path` limits the search to a directory or a single file:
 
 - `path` goes through the same `Workspace.resolve` check as every other path, so `..` escapes and absolute, drive-letter and UNC paths are rejected. A path that does not exist is a tool error.
 - Returned paths stay relative to the workspace root, so they can go straight into `read_file`.
+- A `path` inside `.git` or pointing at a secret file is refused.
 - Dependency and VCS folders are skipped only *below* the search path, so an explicit `path="node_modules/some-lib"` is searched.
 
 Unlike `search_code`, `search_files` looks at every text file, including prose such as `.md` and `.txt`.
@@ -73,7 +74,7 @@ Example result for `search_code("format_price")` against the sample project:
 - `MAX_CODE_MATCHES = 100`: when more matches exist, the search stops and `truncated` is `true`.
 - `MAX_CODE_FILE_BYTES = 512_000`: larger files are usually generated, so they are skipped.
 
-Oversized, binary (a NUL byte in the first 8 KB), non-UTF-8 and unreadable files are counted in `files_skipped` instead of causing an error. A query with no matches returns an empty `matches` list. An empty query, a missing path, a non-source file path, or a path outside the workspace returns a tool error.
+Oversized, binary (a NUL byte in the first 8 KB), non-UTF-8 and unreadable files, and likely secret files such as `credentials.json`, are counted in `files_skipped` instead of causing an error or being searched. A query with no matches returns an empty `matches` list. An empty query, a missing path, a non-source file path, or a path outside the workspace returns a tool error.
 
 ## Repository analysis
 
@@ -147,7 +148,7 @@ These are grouped separately because they are not confirmed facts:
 
 ### Bounds and failures
 
-- Directories that `search_code` skips are skipped here too: VCS, dependency, cache and build output (`.git`, `.venv`, `node_modules`, `__pycache__`, `dist`, `build`, `*.egg-info`, …). Symlinks are not followed.
+- Directories that `search_code` skips are skipped here too: VCS, dependency, cache and build output (`.git`, `.venv`, `node_modules`, `__pycache__`, `dist`, `build`, `*.egg-info`, …). Symlinked and junction directories are not followed.
 - At most **20,000 files** are considered. If the scan stops early, `scan_complete` is `false`.
 - Every list holds at most **50 items**, shallowest paths first. `truncated_fields` names any list that was cut, and `tests.file_count` always gives the full count. A 3,000-file tree produces roughly 12 KB of output.
 - At most 20 manifests (up to 512 KB each) are parsed. `setup.py` is listed but never read, because it is code.

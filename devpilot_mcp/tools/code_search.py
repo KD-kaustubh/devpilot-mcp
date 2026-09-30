@@ -6,6 +6,8 @@ Unlike search_files (every text file, whole workspace), search_code:
 - also skips build output and cache directories (dist, build, coverage, ...);
 - can be limited to a subdirectory or a single file;
 - uses smart case: case-insensitive unless the query contains an uppercase letter.
+
+Like search_files, it never searches .git internals or likely secret files.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from pathlib import Path
 from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel
 
-from devpilot_mcp.text_search import GENERATED_DIRS, SKIPPED_DIRS, iter_files, scan_files
+from devpilot_mcp.text_search import GENERATED_DIRS, SKIPPED_DIRS, ensure_not_sensitive, iter_files, scan_files
 from devpilot_mcp.tools.common import READ_ONLY, as_tool_error
 from devpilot_mcp.workspace import PathNotFoundError, Workspace, WorkspaceError
 
@@ -92,6 +94,7 @@ def search_code(
     target = workspace.resolve(path)
     if not target.exists():
         raise PathNotFoundError(f"Search path not found: '{path}'.")
+    ensure_not_sensitive(workspace, target, path)
     if target.is_file() and not is_source_file(target):
         raise WorkspaceError(f"Not a source file: '{path}'. Use search_files to search any text file.")
 

@@ -85,7 +85,7 @@ python -m unittest tests.test_server.ServerTests.test_annotation_profiles_are_in
 
 The Git tests need `git` on `PATH`. They build throwaway repositories with an isolated Git config, and are skipped if Git is not installed. The GitHub tests **never contact GitHub**: tool and client tests use a fake transport, and the HTTP transport is tested against local `127.0.0.1` servers. On Windows, the symlink-escape tests are skipped unless Developer Mode is on, because creating symlinks requires it.
 
-Current result on Windows (Python 3.12): **359 tests, 355 passed, 4 skipped, 0 failed.** The skips are the three Windows symlink tests that need Developer Mode, and the real-pytest test, because pytest is not installed in DevPilot's environment. On Linux (Ubuntu, Python 3.12) the same suite passes with 2 skipped: the Windows-only junction test and the real-pytest test. pytest behaviour is still covered by parsing recorded output and by a real "pytest not installed" run.
+Current result on Windows (Python 3.12): **371 tests, 365 passed, 6 skipped, 0 failed.** The skips are the five Windows symlink tests that need Developer Mode, and the real-pytest test, because pytest is not installed in DevPilot's environment. On Linux (Ubuntu, Python 3.12) the same suite passes with 3 skipped: the two Windows-only junction tests and the real-pytest test. pytest behaviour is still covered by parsing recorded output and by a real "pytest not installed" run.
 
 **Continuous integration:** `.github/workflows/test.yml` installs the package and runs the same `unittest` command on every push and pull request, on Ubuntu and Windows with Python 3.11 and 3.12.
 
@@ -102,5 +102,6 @@ DevPilot was built in phases, each adding one capability on top of the same boun
 7. **Controlled patching:** `apply_patch` applies an explicit, caller-supplied unified diff atomically; `revert_patch` undoes it by `change_id`.
 8. **Testing and validation:** `get_test_commands`, `run_tests` (two fixed commands, on request only) and `validate_repository`.
 9. **Production cleanup:** optional `path` for `search_files`, shared low-level modules, one documented set of annotation profiles, CI, this README and the MIT license.
+10. **v0.1.1 security fix:** after external testing, the read and search tools never return secret files or `.git` internals, and directory walks never enter Windows junctions.
 
 Throughout, DevPilot never decides what to change and never runs arbitrary commands: the caller supplies every patch, and the only code it runs is the repository's tests, through two fixed commands and only on request.

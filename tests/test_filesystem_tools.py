@@ -2,7 +2,9 @@
 
 import unittest
 
-from devpilot_mcp.tools import filesystem
+from devpilot_mcp.sensitive import is_sensitive_path
+from devpilot_mcp.text_search import SensitivePathError, is_link, iter_files
+from devpilot_mcp.tools import code_search, filesystem, repository
 from devpilot_mcp.tools.filesystem import NotATextFileError
 from devpilot_mcp.workspace import PathNotFoundError, PathOutsideWorkspaceError, WorkspaceError
 from tests.helpers import WorkspaceTestCase
@@ -162,6 +164,119 @@ class SearchFilesPathTests(WorkspaceTestCase):
         # Like search_code, the skip list only prunes sub-directories below the search path.
         result = filesystem.search_files(self.workspace, "hello", "node_modules")
         self.assertEqual(result.files_with_matches, ["node_modules/dep.js"])
+
+
+SECRET_VALUE = "sk-live-DEVPILOT-TEST-VALUE"
+
+
+class SensitivePathTests(WorkspaceTestCase):
+    """Secret files and .git internals are never returned by the read and search tools."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        root = self.workspace.root
+        (root / "config").mkdir()
+        (root / ".git").mkdir()
+        files = {
+            ".env": f"API_KEY={SECRET_VALUE}\n",
+            "config/.env.production": f"API_KEY={SECRET_VALUE}\n",
+            "id_rsa": f"-----BEGIN OPENSSH PRIVATE KEY-----\n{SECRET_VALUE}\n",
+            "server.KEY": f"{SECRET_VALUE}\n",
+            "credentials.json": f'{{"token": "{SECRET_VALUE}"}}\n',
+            ".git/config": f'[remote "origin"]\n\turl = https://user:{SECRET_VALUE}@github.com/o/r.git\n',
+            ".env.example": "API_KEY=\n",
+        }
+        for rel, text in files.items():
+            (root / rel).write_bytes(text.encode("utf-8"))
+
+    def test_read_file_refuses_secret_files_and_git_internals(self) -> None:
+        for path in (".env", "config/.env.production", "id_rsa", "server.KEY", "credentials.json",
+                     ".git/config", "./.git/config", "config/../.env"):  # fmt: skip
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(SensitivePathError, "never returns its contents") as ctx:
+                    filesystem.read_file(self.workspace, path)
+                self.assertNotIn(SECRET_VALUE, str(ctx.exception))
+
+    def test_templates_stay_readable(self) -> None:
+        self.assertEqual(filesystem.read_file(self.workspace, ".env.example").content, "API_KEY=\n")
+
+    def test_link_to_a_secret_file_is_refused(self) -> None:
+        link = self.workspace.root / "notes.txt"
+        try:
+            link.symlink_to(self.workspace.root / ".env")
+        except OSError:
+            self.skipTest("Creating symlinks is not permitted on this system.")
+        with self.assertRaises(SensitivePathError):
+            filesystem.read_file(self.workspace, "notes.txt")
+
+    def test_search_files_never_returns_secret_content(self) -> None:
+        result = filesystem.search_files(self.workspace, SECRET_VALUE)
+        self.assertEqual(result.matches, [])
+        result = filesystem.search_files(self.workspace, "API_KEY")
+        self.assertEqual(result.files_with_matches, [".env.example"])
+
+    def test_search_code_never_returns_secret_content(self) -> None:
+        result = code_search.search_code(self.workspace, SECRET_VALUE.lower())
+        self.assertEqual(result.matches, [])
+        self.assertGreaterEqual(result.files_skipped, 1)  # credentials.json is a .json "source" file
+
+    def test_search_paths_inside_git_or_secret_files_are_refused(self) -> None:
+        for path in (".git", ".git/config", ".env", "credentials.json"):
+            with self.subTest(path=path):
+                with self.assertRaises(SensitivePathError):
+                    filesystem.search_files(self.workspace, "url", path)
+                with self.assertRaises(SensitivePathError):
+                    code_search.search_code(self.workspace, "url", path)
+
+    def test_listing_shows_names_but_never_contents(self) -> None:
+        names = [e.name for e in filesystem.list_directory(self.workspace, ".").entries]
+        self.assertIn(".env", names)
+
+    def test_sensitive_path_rules(self) -> None:
+        for rel in (".env", ".ENV", "a/b/.env.local", "id_ed25519", "x.pem", ".git", ".git/HEAD", "sub/.GIT/config"):
+            self.assertTrue(is_sensitive_path(rel), rel)
+        for rel in (".", "", ".env.example", ".env.sample", "src/app.py", "docs/keys.md", ".github/workflows/a.yml"):
+            self.assertFalse(is_sensitive_path(rel), rel)
+
+
+class LinkedDirectoryWalkTests(WorkspaceTestCase):
+    """The shared directory walk never enters a symlinked or junction directory."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.outside = self.secret.parent / "outside"
+        self.outside.mkdir()
+        (self.outside / "leak.py").write_text("OUTSIDE_MARKER = 'TOP SECRET'\n", encoding="utf-8")
+
+    def _assert_not_followed(self, link_name: str) -> None:
+        link = self.workspace.root / link_name
+        self.assertTrue(is_link(link))
+        walked = [p.name for p in iter_files(self.workspace.root)]
+        self.assertNotIn("leak.py", walked)
+        self.assertEqual(filesystem.search_files(self.workspace, "TOP SECRET").matches, [])
+        self.assertEqual(code_search.search_code(self.workspace, "OUTSIDE_MARKER").matches, [])
+        self.assertEqual(repository.analyze_repository(self.workspace).total_files, 4)  # leak.py not counted
+        with self.assertRaises(PathOutsideWorkspaceError):
+            filesystem.read_file(self.workspace, f"{link_name}/leak.py")
+
+    def test_windows_junction_is_not_followed(self) -> None:
+        try:
+            import _winapi  # Windows only; junctions need no special privileges
+        except ImportError:
+            self.skipTest("Directory junctions are Windows-only.")
+        _winapi.CreateJunction(str(self.outside), str(self.workspace.root / "jlink"))
+        self._assert_not_followed("jlink")
+
+    def test_directory_symlink_is_not_followed(self) -> None:
+        try:
+            (self.workspace.root / "slink").symlink_to(self.outside, target_is_directory=True)
+        except OSError:
+            self.skipTest("Creating symlinks is not permitted on this system.")
+        self._assert_not_followed("slink")
+
+    def test_regular_directories_are_not_links(self) -> None:
+        self.assertFalse(is_link(self.workspace.root / "src"))
+        self.assertFalse(is_link(self.workspace.root / "missing"))
 
 
 if __name__ == "__main__":

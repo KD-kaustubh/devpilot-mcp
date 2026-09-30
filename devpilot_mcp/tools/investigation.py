@@ -22,7 +22,6 @@ import os
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
 
@@ -31,7 +30,7 @@ from pydantic import BaseModel, Field
 
 from devpilot_mcp.github.client import TOKEN_ENV_VAR, GitHubClient
 from devpilot_mcp.github.remote import GitHubRemoteError, discover_github_repository
-from devpilot_mcp.sensitive import REDACTED, SECRET_FILE_PATTERNS, SECRET_VALUE_PATTERNS
+from devpilot_mcp.sensitive import REDACTED, SECRET_VALUE_PATTERNS, is_secret_file_name
 from devpilot_mcp.text_search import (
     GENERATED_DIRS,
     SKIPPED_DIRS,
@@ -134,10 +133,6 @@ SYNONYMS: dict[str, tuple[str, ...]] = {
 QUERY_WEIGHT = 2
 SYNONYM_WEIGHT = 1
 KIND_FACTOR = {"source": 1.0, "test": 0.7, "documentation": 0.6}
-
-# Evidence never includes likely secret files (devpilot_mcp.sensitive), even if their extension
-# looks like source/config. Templates are safe to show as evidence.
-SECRET_FILE_EXCEPTIONS = (".env.example", ".env.sample", ".env.template")
 
 
 def _stem(word: str) -> str:
@@ -390,7 +385,9 @@ class _Redactor:
 
 
 def _is_secret_file(name: str) -> bool:
-    return name not in SECRET_FILE_EXCEPTIONS and any(fnmatchcase(name, p) for p in SECRET_FILE_PATTERNS)
+    # Evidence never includes likely secret files, even if their extension looks like source/config.
+    # Templates such as .env.example are safe to show (devpilot_mcp.sensitive).
+    return is_secret_file_name(name)
 
 
 def _file_kind(rel: str) -> FileKind:

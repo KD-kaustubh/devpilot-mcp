@@ -94,9 +94,10 @@ Then ask: *"Use DevPilot to analyze this repository and explain its structure."*
 
 ## Security at a Glance
 
-- Every path stays inside the workspace. `..`, absolute, drive and UNC paths, and escaping symlinks are rejected.
+- Every path stays inside the workspace. `..`, absolute, drive and UNC paths, and escaping symlinks and junctions are rejected.
 - Only two places start processes: allowlisted read-only Git commands, and two fixed Python test commands. There is no shell and no caller-supplied command.
-- Patches are validated in full and applied atomically. `.git` and secret files can never be written.
+- `.env` files, private keys, credential files and `.git` internals are never read, searched or written.
+- Patches are validated in full and applied atomically.
 - GitHub access is HTTPS GET to `api.github.com` only, and the token never appears in output.
 - Every tool is annotated as read-only, writes-files or executes-code, so clients can ask before risky calls.
 

@@ -13,7 +13,7 @@ from typing import Literal
 from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel
 
-from devpilot_mcp.text_search import NotATextFileError, iter_files, read_text, scan_files
+from devpilot_mcp.text_search import NotATextFileError, ensure_not_sensitive, iter_files, read_text, scan_files
 from devpilot_mcp.tools.common import READ_ONLY, as_tool_error
 from devpilot_mcp.workspace import PathNotFoundError, Workspace, WorkspaceError
 
@@ -110,7 +110,7 @@ def list_directory(workspace: Workspace, path: str = ".") -> DirectoryListing:
 
 
 def read_file(workspace: Workspace, path: str) -> FileContent:
-    """Read a UTF-8 text file from the workspace."""
+    """Read a UTF-8 text file from the workspace (never .git internals or secret files)."""
     if not (path or "").strip() or path.strip() == ".":
         raise WorkspaceError("A file path is required.")
     target = workspace.resolve(path)
@@ -118,6 +118,7 @@ def read_file(workspace: Workspace, path: str) -> FileContent:
         raise PathNotFoundError(f"File not found: '{path}'.")
     if not target.is_file():
         raise WorkspaceError(f"Not a file: '{path}'. Use list_directory to browse directories.")
+    ensure_not_sensitive(workspace, target, path)
 
     size = target.stat().st_size
     if size > MAX_READ_BYTES:
@@ -135,9 +136,10 @@ def read_file(workspace: Workspace, path: str) -> FileContent:
 def search_files(workspace: Workspace, query: str, path: str = ".") -> SearchResults:
     """Case-insensitive substring search across text files under `path` (default: the whole workspace).
 
-    Binary files, files larger than MAX_SEARCH_FILE_BYTES, and common
-    dependency/VCS directories are skipped. Symlinks are not followed.
-    `path` goes through the same Workspace boundary as every other tool.
+    Binary files, files larger than MAX_SEARCH_FILE_BYTES, secret files and
+    common dependency/VCS directories are skipped. Symlinks and junctions are
+    not followed. `path` goes through the same Workspace boundary as every
+    other tool, and may not be inside .git or a secret file.
     """
     if not query or not query.strip():
         raise WorkspaceError("Search query must not be empty.")
@@ -146,6 +148,7 @@ def search_files(workspace: Workspace, query: str, path: str = ".") -> SearchRes
     target = workspace.resolve(path)
     if not target.exists():
         raise PathNotFoundError(f"Search path not found: '{path}'.")
+    ensure_not_sensitive(workspace, target, path)
 
     scan = scan_files(
         workspace,
@@ -185,6 +188,10 @@ def register(server: MCPServer, workspace: Workspace) -> None:
     def read_file_tool(path: str) -> FileContent:
         """Read a UTF-8 text file from the workspace. Binary and very large files are rejected.
 
+        For safety, files inside .git and likely secret files (.env and .env.* except templates
+        such as .env.example, private keys, credentials.json, secrets.*, .npmrc, .pypirc, .netrc)
+        are never returned.
+
         Args:
             path: File path relative to the workspace root, e.g. "src/app.py".
         """
@@ -198,7 +205,7 @@ def register(server: MCPServer, workspace: Workspace) -> None:
         """Search text files in the workspace for a case-insensitive substring.
 
         Returns each matching line with its file path (relative to the workspace root) and
-        line number.
+        line number. Likely secret files and .git internals are never searched.
 
         Args:
             query: Text to search for.

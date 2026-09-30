@@ -12,12 +12,21 @@ All paths are relative to the workspace root. `Workspace.resolve()` in `devpilot
 2. joins the path to the root and calls `resolve()`, which collapses `..` and follows symlinks;
 3. checks that the result is still inside the root. If it isn't, the request is rejected (`../../secret.txt` fails here).
 
-A symlink inside the workspace that points outside it is hidden from `list_directory`, skipped by `search_files`, `search_code` and `analyze_repository`, and rejected by `read_file`. `analyze_repository` takes no path at all. It always analyzes the workspace root, and any extra arguments are dropped. Error messages never include absolute host paths.
+A symlink inside the workspace that points outside it is hidden from `list_directory` and rejected by `read_file`, and no directory walk enters a symlinked or junction directory (see below). `analyze_repository` takes no path at all. It always analyzes the workspace root, and any extra arguments are dropped. Error messages never include absolute host paths.
 
 ### Symlink and junction protection
 
-- **Reads:** a symlink that leads outside the workspace is hidden, skipped or rejected, as described above. Symlinks are not followed when walking directories.
+- **Reads:** a path given explicitly is resolved first, so reading or listing through a symlink or junction that leads outside the workspace is rejected. The directory walk behind `search_files`, `search_code`, `analyze_repository`, `investigate_repository` and syntax validation never enters a symlinked directory or a Windows junction, wherever it points.
 - **Writes:** a patch target may not contain a symlink or junction **anywhere on its path**, even one that points back inside the workspace, and the final path must resolve to its literal location. See [Validation pipeline](TOOLS.md#validation-pipeline).
+
+### Secret files and .git
+
+`read_file`, `search_files` and `search_code` never return the contents of files inside a `.git` directory or of likely secret files: `.env` and `.env.*` (templates such as `.env.example`, `.env.sample` and `.env.template` stay readable), private keys (`*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*`, `id_ed25519*`, …), `credentials.json`, `secrets.*`, `.npmrc`, `.pypirc` and `.netrc`. Names are matched case-insensitively.
+
+- Asking for such a file, directly or through a path that resolves to one, is a tool error that never includes the contents.
+- Searches skip such files and never search inside `.git`.
+- `list_directory` still shows their names, so the model can see that a `.env` exists without seeing what is in it.
+- `investigate_repository` never uses them as evidence, and patches can never write them (for writes, only `.env.example` is exempt).
 
 ### Read-only, write and execute tools
 
@@ -49,7 +58,7 @@ See [Controlled code modification](TOOLS.md#controlled-code-modification).
 ### Secrets and environment
 
 - **GitHub token:** `GITHUB_TOKEN` is read at request time and placed only in the `Authorization` header. It is never returned, logged or included in error text.
-- **Secret files:** likely secret files (`.env*`, keys, credentials) are never used as investigation evidence and can never be patched.
+- **Secret files:** likely secret files (`.env*`, keys, credentials) and `.git` internals are never read, searched, used as evidence or patched. See [Secret files and .git](#secret-files-and-git).
 - **Test environment:** interpreter and pytest injection variables, every `GIT_*` variable and every variable whose name looks secret are removed before tests run, so test code cannot read `GITHUB_TOKEN`. This is a name-based blocklist, not a sandbox.
 - **Output redaction (best-effort, not guaranteed):** test output and investigation evidence are scanned for known secret patterns and the values of removed variables, which are replaced with `[REDACTED]`. Secrets in other forms can still appear.
 
@@ -68,6 +77,7 @@ Every Git and test process has a timeout and an output cap, every HTTP request h
 - Test code run by `run_tests` runs with the permissions of the DevPilot process. It can read and write files and use the network; there is **no network or filesystem isolation**.
 - Secret redaction and environment sanitization are **best-effort**; they do not guarantee that no secret reaches a client.
 - Clean/smudge filter drivers configured in a repository's own `.git/config` cannot be disabled generically.
+- Secret files are recognised **by name only**, and `git_diff` output is not filtered (see [Secret-file detection](#secret-file-detection)).
 
 The full list is under [Known Limitations](#known-limitations).
 
@@ -87,6 +97,11 @@ DevPilot limits what a client can reach, but it is not a sandbox. These are the 
 - **Counts come from summary text.** Heavily customised pytest output can leave counts `null`.
 - **Syntax is checked with DevPilot's Python grammar**, so code for a newer Python may be reported as a syntax error.
 - **Git filter drivers.** Clean/smudge filter drivers configured in the repository's own `.git/config` cannot be disabled generically. Only run the Git tools on repositories whose `.git/config` you trust.
+
+### Secret-file detection
+
+- **By name only.** Only the file names listed under [Secret files and .git](#secret-files-and-git) are protected. A secret stored in an ordinary file, such as `settings.py` or `config.yaml`, can be read and searched.
+- **Git diffs are not filtered.** If a secret file is tracked by Git, `git_diff` can show its changes. Keep secret files out of Git: untracked and git-ignored files never appear in a diff.
 
 ### Patching
 
@@ -122,6 +137,7 @@ The suite builds a temporary workspace with a `secret.txt` just outside it. It c
 
 - **Git:** each blocked route for launching programs (fsmonitor, external diff, textconv, pager, …) is shown to be live with plain `git` and blocked in DevPilot, and a snapshot of every file, `.git` included, proves that nothing is written.
 - **GitHub:** tool output, every error path, captured logs, stdout/stderr and the workspace files are checked for the token, and redirects and non-`api.github.com` hosts are refused.
+- **Secret files and links:** `read_file`, `search_files` and `search_code` are tested against `.env` files, keys, credentials, `.git/config`, a link to a secret file, and symlinked and junction directories that lead outside the workspace, including through the MCP client. These tests fail on v0.1.0 and pass from v0.1.1.
 - **Investigation:** tests use a fake GitHub client, real throwaway Git repositories and hashes of every file before and after.
 - **Patching:** the patch tests attempt the full set of malicious patches (traversal, absolute, drive and UNC paths, symlinks and Windows junctions, protected files, unexpected metadata, oversized and malformed patches). Each one takes a byte-level snapshot before and after. Failures are forced partway through multi-file patches to prove rollback.
 - **Testing and validation:** the Phase 8 tests run real unittest suites in throwaway projects, covering passing, failing, skipped, timed-out, truncated, side-effecting and no-tests runs. They also try shell and command injection payloads (`; whoami`, `&& powershell …`, `cmd /c …`, `../../…`, absolute and UNC paths, tampered argument vectors) and check that no process starts, and that the environment and output leak no secrets.
