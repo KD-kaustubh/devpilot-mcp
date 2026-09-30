@@ -92,7 +92,7 @@ class WorkspaceCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.base = Path(self._tmp.name)
+        self.base = Path(self._tmp.name).resolve()  # long form: Windows TEMP can be an 8.3 short path
         self.root = self.base / "repo"
         self.root.mkdir()
         self.workspace = Workspace(self.root)
@@ -526,7 +526,8 @@ class SyntaxTests(WorkspaceCase):
         self.assertEqual((report.files_checked, report.error_count), (6, 2))
         self.assertEqual([(e.path, e.line) for e in report.errors], [("bad.py", 1), ("indent.py", 2)])
         self.assertIn("IndentationError", report.errors[1].message)
-        self.assertEqual([w.path for w in report.warnings], ["warn.py"])
+        # An invalid escape such as '\d' is a SyntaxWarning from Python 3.12; 3.11 raises a DeprecationWarning.
+        self.assertEqual([w.path for w in report.warnings], ["warn.py"] if sys.version_info >= (3, 12) else [])
         self.assertTrue(report.complete)
 
     def test_parsing_never_executes_code(self) -> None:

@@ -52,7 +52,7 @@ class GitRepoTestCase(unittest.TestCase):
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
-        self.base = Path(self._tmp.name)
+        self.base = Path(self._tmp.name).resolve()  # long form: Windows TEMP can be an 8.3 short path
         self.root = self.base / "repo"
         self.root.mkdir()
         self.run_git("-c", "init.defaultBranch=main", "init", "-q")
@@ -438,7 +438,7 @@ ALL_TOOLS = (git.git_status, git.git_log, git.git_diff, git.git_branch)
 class RepositoryDetectionTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
-        self.base = Path(self._tmp.name)
+        self.base = Path(self._tmp.name).resolve()  # long form: Windows TEMP can be an 8.3 short path
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
