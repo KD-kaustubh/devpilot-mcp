@@ -1,7 +1,7 @@
 # DevPilot MCP
 
 [![Tests](https://github.com/KD-kaustubh/devpilot-mcp/actions/workflows/test.yml/badge.svg)](https://github.com/KD-kaustubh/devpilot-mcp/actions/workflows/test.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/KD-kaustubh/devpilot-mcp/blob/main/LICENSE)
 
 An [MCP](https://modelcontextprotocol.io) server that gives an AI model structured, security-conscious access to one software repository. It can read and search code, describe the repository, inspect Git and GitHub, gather evidence for developer questions, apply patches **you** supply (and revert them), and run the repository's Python tests.
 
@@ -47,6 +47,16 @@ AI model (e.g. Gemini) ──► MCP client ──stdio──► DevPilot MCP se
 
 Requires Python 3.10+ (3.11+ recommended) and Git.
 
+**Install from PyPI:**
+
+```powershell
+pip install devpilot-mcp
+```
+
+When installed this way, always set `DEVPILOT_WORKSPACE` to the **absolute** path of the repository DevPilot should work on, for example in your MCP client's server settings.
+
+**Or clone the repository** (includes the tests and a sample workspace):
+
 ```powershell
 git clone https://github.com/KD-kaustubh/devpilot-mcp.git
 cd devpilot-mcp
@@ -80,7 +90,7 @@ Set **Transport** to `STDIO` and **Command** to the full path of `.venv\Scripts\
 claude mcp add devpilot -e DEVPILOT_WORKSPACE=D:/path/to/repo -- D:/path/to/devpilot-mcp/.venv/Scripts/devpilot-mcp.exe
 ```
 
-Then ask: *"Use DevPilot to analyze this repository and explain its structure."* More in the [usage guide](docs/USAGE.md).
+Then ask: *"Use DevPilot to analyze this repository and explain its structure."* More in the [usage guide](https://github.com/KD-kaustubh/devpilot-mcp/blob/main/docs/USAGE.md).
 
 ## Security at a Glance
 
@@ -90,17 +100,17 @@ Then ask: *"Use DevPilot to analyze this repository and explain its structure."*
 - GitHub access is HTTPS GET to `api.github.com` only, and the token never appears in output.
 - Every tool is annotated as read-only, writes-files or executes-code, so clients can ask before risky calls.
 
-**It is not a sandbox.** Tests run with DevPilot's own permissions and network access, and secret redaction is best-effort. See [Security](docs/SECURITY.md) for the full model and known limitations.
+**It is not a sandbox.** Tests run with DevPilot's own permissions and network access, and secret redaction is best-effort. See [Security](https://github.com/KD-kaustubh/devpilot-mcp/blob/main/docs/SECURITY.md) for the full model and known limitations.
 
 ## Documentation
 
 | Document | Contents |
 |----------|----------|
-| [Usage guide](docs/USAGE.md) | Configuration, MCP Inspector, client setup, example workflows |
-| [Tool reference](docs/TOOLS.md) | Every tool's inputs, output examples and limits |
-| [Security](docs/SECURITY.md) | Security model, known limitations, security tests |
-| [Development](docs/DEVELOPMENT.md) | Architecture, running tests, CI, phase history |
+| [Usage guide](https://github.com/KD-kaustubh/devpilot-mcp/blob/main/docs/USAGE.md) | Configuration, MCP Inspector, client setup, example workflows |
+| [Tool reference](https://github.com/KD-kaustubh/devpilot-mcp/blob/main/docs/TOOLS.md) | Every tool's inputs, output examples and limits |
+| [Security](https://github.com/KD-kaustubh/devpilot-mcp/blob/main/docs/SECURITY.md) | Security model, known limitations, security tests |
+| [Development](https://github.com/KD-kaustubh/devpilot-mcp/blob/main/docs/DEVELOPMENT.md) | Architecture, running tests, CI, phase history |
 
 ## License
 
-[MIT](LICENSE)
+[MIT](https://github.com/KD-kaustubh/devpilot-mcp/blob/main/LICENSE)
