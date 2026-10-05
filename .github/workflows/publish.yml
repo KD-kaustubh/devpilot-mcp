@@ -26,11 +26,27 @@ jobs:
             exit 1
           fi
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Build the web UI into the Python package
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build
+
       - name: Build distributions
         run: |
           python -m pip install build twine
           python -m build
           python -m twine check --strict dist/*
+
+      - name: Check the wheel contains the web UI
+        run: |
+          python -c "import glob, zipfile, sys; names = zipfile.ZipFile(glob.glob('dist/*.whl')[0]).namelist(); sys.exit(0 if 'devpilot_ui/static/index.html' in names else 'The wheel is missing the built web UI')"
 
       - uses: actions/upload-artifact@v4
         with:

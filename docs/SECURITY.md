@@ -42,7 +42,7 @@ Every tool carries one of three MCP annotation profiles, all defined in `devpilo
 
 ### Execution boundaries
 
-- **Exactly two subprocess launch points:** `_execute` in `devpilot_mcp/tools/git.py` (Git) and `run_process` in `devpilot_mcp/testing/runner.py` (tests). Both take an argument list, use `shell=False` and closed stdin, and enforce a timeout and an output cap.
+- **Exactly two subprocess launch points:** `_execute` in `devpilot_mcp/tools/git.py` (Git) and `run_process` in `devpilot_mcp/testing/runner.py` (tests). Both take an argument list, use `shell=False` and closed stdin, and enforce a timeout and an output cap. (The optional web UI, DevPilot Studio, starts the DevPilot server itself as its MCP child process, through the MCP SDK's stdio client.)
 - **Git command allowlist:** only fixed read-only forms of `status`, `log`, `diff`, `diff-files`, `branch`, `rev-parse` and `remote get-url` can run, with the fsmonitor hook, external diff drivers, textconv filters, the pager and network protocols disabled. See [Read-only execution boundary](TOOLS.md#read-only-execution-boundary).
 - **No arbitrary shell executor.** No tool accepts a command, executable, argument list or shell string. The only test commands are `python -m pytest -p no:cacheprovider` and `python -m unittest` (optionally `discover -s <dir>`), launched by absolute interpreter path. See [Security restrictions](TOOLS.md#security-restrictions).
 
@@ -67,6 +67,10 @@ See [Controlled code modification](TOOLS.md#controlled-code-modification).
 - HTTPS to `api.github.com` only, GET only, three fixed endpoints. Tools cannot supply a URL, host, path, method or header.
 - **Redirects are never followed**, so the `Authorization` header cannot reach another host.
 - See [Read-only HTTP boundary](TOOLS.md#read-only-http-boundary).
+
+### Web UI
+
+The optional DevPilot Studio web UI listens on `127.0.0.1` only, accepts only its own page's origin, and asks for explicit approval before every call that writes files or runs code. See [Web UI safety](UI.md#safety).
 
 ### Bounded operations
 

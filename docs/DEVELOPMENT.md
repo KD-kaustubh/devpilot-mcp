@@ -55,11 +55,17 @@ DevPilot-MCP/
 │       ├── investigation.py # investigate_repository
 │       ├── patch.py       # apply_patch, revert_patch (the only write tools)
 │       └── testing.py     # get_test_commands, run_tests, validate_repository
+├── devpilot_ui/           # DevPilot Studio backend (optional [ui] extra; see docs/UI.md)
+│   ├── app.py             # local web server: status API, chat/tool WebSocket, built page
+│   ├── agent.py           # AI tool-calling loop (AI Pipe / any OpenAI-compatible model)
+│   ├── mcp_session.py     # MCP client session and the approval gate for every tool call
+│   └── config.py          # UI settings (token, model, port)
+├── ui/                    # DevPilot Studio frontend (React, TypeScript, Tailwind, Framer Motion)
 ├── docs/                  # usage guide, tool reference, security, development
 ├── tests/                 # unittest suite (sandboxing, tool logic, in-process MCP client)
 ├── workspace/
 │   └── sample_project/    # small demo repo to explore with the tools
-├── .github/workflows/test.yml # CI: runs the unittest suite
+├── .github/workflows/     # CI: tests on Windows and Linux + web UI build; PyPI publishing on release
 ├── .env.example
 ├── LICENSE
 └── pyproject.toml
@@ -85,9 +91,9 @@ python -m unittest tests.test_server.ServerTests.test_annotation_profiles_are_in
 
 The Git tests need `git` on `PATH`. They build throwaway repositories with an isolated Git config, and are skipped if Git is not installed. The GitHub tests **never contact GitHub**: tool and client tests use a fake transport, and the HTTP transport is tested against local `127.0.0.1` servers. On Windows, the symlink-escape tests are skipped unless Developer Mode is on, because creating symlinks requires it.
 
-Current result on Windows (Python 3.12): **371 tests, 365 passed, 6 skipped, 0 failed.** The skips are the five Windows symlink tests that need Developer Mode, and the real-pytest test, because pytest is not installed in DevPilot's environment. On Linux (Ubuntu, Python 3.12) the same suite passes with 3 skipped: the two Windows-only junction tests and the real-pytest test. pytest behaviour is still covered by parsing recorded output and by a real "pytest not installed" run.
+Current result on Windows (Python 3.12): **385 tests, 379 passed, 6 skipped, 0 failed.** The skips are the five Windows symlink tests that need Developer Mode, and the real-pytest test, because pytest is not installed in DevPilot's environment. On Linux (Ubuntu, Python 3.12) the same suite passes with 3 skipped: the two Windows-only junction tests and the real-pytest test. pytest behaviour is still covered by parsing recorded output and by a real "pytest not installed" run.
 
-**Continuous integration:** `.github/workflows/test.yml` installs the package and runs the same `unittest` command on every push and pull request, on Ubuntu and Windows with Python 3.11 and 3.12.
+**Continuous integration:** `.github/workflows/test.yml` installs the package with the `[ui]` extra and runs the same `unittest` command on every push and pull request, on Ubuntu and Windows with Python 3.11 and 3.12. A second job type-checks and builds the web UI. The web UI's own development steps are in [Web UI](UI.md#developing-the-ui).
 
 ## Phase History
 
@@ -103,5 +109,6 @@ DevPilot was built in phases, each adding one capability on top of the same boun
 8. **Testing and validation:** `get_test_commands`, `run_tests` (two fixed commands, on request only) and `validate_repository`.
 9. **Production cleanup:** optional `path` for `search_files`, shared low-level modules, one documented set of annotation profiles, CI, this README and the MIT license.
 10. **v0.1.1 security fix:** after external testing, the read and search tools never return secret files or `.git` internals, and directory walks never enter Windows junctions.
+11. **DevPilot Studio (v0.2.0):** a local web UI. It chats through AI Pipe, shows every tool call in an animated timeline, and asks for approval before any change or test run.
 
 Throughout, DevPilot never decides what to change and never runs arbitrary commands: the caller supplies every patch, and the only code it runs is the repository's tests, through two fixed commands and only on request.

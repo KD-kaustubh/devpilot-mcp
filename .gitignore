@@ -11,6 +11,10 @@ dist/
 .venv/
 venv/
 
+# Web UI: dependencies and the built bundle (built by `npm run build`, shipped in the wheel)
+ui/node_modules/
+devpilot_ui/static/
+
 # Local configuration and secrets
 .env
 

@@ -3,7 +3,7 @@
 [![Tests](https://github.com/KD-kaustubh/devpilot-mcp/actions/workflows/test.yml/badge.svg)](https://github.com/KD-kaustubh/devpilot-mcp/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/KD-kaustubh/devpilot-mcp/blob/main/LICENSE)
 
-An [MCP](https://modelcontextprotocol.io) server that gives an AI model structured, security-conscious access to one software repository. It can read and search code, describe the repository, inspect Git and GitHub, gather evidence for developer questions, apply patches **you** supply (and revert them), and run the repository's Python tests.
+An [MCP](https://modelcontextprotocol.io) server that gives an AI model structured, security-conscious access to one software repository. It can read and search code, describe the repository, inspect Git and GitHub, gather evidence for developer questions, apply patches **you** supply (and revert them), and run the repository's Python tests. An optional local web UI, **DevPilot Studio**, lets you chat with the repository and watch every tool call live.
 
 DevPilot collects evidence and performs tightly bounded actions. The AI model does the reasoning.
 
@@ -92,6 +92,26 @@ claude mcp add devpilot -e DEVPILOT_WORKSPACE=D:/path/to/repo -- D:/path/to/devp
 
 Then ask: *"Use DevPilot to analyze this repository and explain its structure."* More in the [usage guide](https://github.com/KD-kaustubh/devpilot-mcp/blob/main/docs/USAGE.md).
 
+## Web UI: DevPilot Studio
+
+A local web app to chat with your repository and watch every tool call happen live.
+
+```powershell
+pip install "devpilot-mcp[ui]"
+devpilot-ui
+```
+
+It opens `http://127.0.0.1:8765` in your browser, with three panels:
+- **Sidebar:** the workspace with its Git status, quick actions and the 18 tools.
+- **Chat:** streaming Markdown answers, with clickable file paths.
+- **Activity:** an animated timeline of every tool call, including calls blocked by DevPilot's security.
+
+Setup:
+- **AI chat:** needs an [AI Pipe](https://aipipe.org/login) token in `AIPIPE_TOKEN`. Quick actions work without it.
+- **Approval:** anything that changes files or runs tests waits for you to click **Approve**.
+
+See the [Web UI guide](https://github.com/KD-kaustubh/devpilot-mcp/blob/main/docs/UI.md).
+
 ## Security at a Glance
 
 - Every path stays inside the workspace. `..`, absolute, drive and UNC paths, and escaping symlinks and junctions are rejected.
@@ -108,6 +128,7 @@ Then ask: *"Use DevPilot to analyze this repository and explain its structure."*
 | Document | Contents |
 |----------|----------|
 | [Usage guide](https://github.com/KD-kaustubh/devpilot-mcp/blob/main/docs/USAGE.md) | Configuration, MCP Inspector, client setup, example workflows |
+| [Web UI](https://github.com/KD-kaustubh/devpilot-mcp/blob/main/docs/UI.md) | DevPilot Studio: setup, AI Pipe, approvals, safety, development |
 | [Tool reference](https://github.com/KD-kaustubh/devpilot-mcp/blob/main/docs/TOOLS.md) | Every tool's inputs, output examples and limits |
 | [Security](https://github.com/KD-kaustubh/devpilot-mcp/blob/main/docs/SECURITY.md) | Security model, known limitations, security tests |
 | [Development](https://github.com/KD-kaustubh/devpilot-mcp/blob/main/docs/DEVELOPMENT.md) | Architecture, running tests, CI, phase history |

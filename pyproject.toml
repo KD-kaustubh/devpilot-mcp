@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "devpilot-mcp"
-version = "0.1.1"
-description = "An MCP server that gives AI models structured, security-conscious access to a software repository, including controlled patching and test execution."
+version = "0.2.0"
+description = "An MCP server that gives AI models structured, security-conscious access to a software repository, including controlled patching, test execution and an optional web UI."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Kaustubh Dwivedi" }]
-keywords = ["mcp", "model-context-protocol", "ai", "developer-tools", "code-search", "git", "github"]
+keywords = ["mcp", "model-context-protocol", "ai", "developer-tools", "code-search", "git", "github", "web-ui"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -28,6 +28,14 @@ dependencies = [
     "python-dotenv>=1.0",
 ]
 
+[project.optional-dependencies]
+# DevPilot Studio web UI (`devpilot-ui`). Starlette and uvicorn also come with mcp; they are listed for clarity.
+ui = [
+    "openai>=1.40",
+    "starlette>=0.37",
+    "uvicorn>=0.30",
+]
+
 [project.urls]
 Homepage = "https://github.com/KD-kaustubh/devpilot-mcp"
 Documentation = "https://github.com/KD-kaustubh/devpilot-mcp/blob/main/docs/USAGE.md"
@@ -36,6 +44,11 @@ Issues = "https://github.com/KD-kaustubh/devpilot-mcp/issues"
 
 [project.scripts]
 devpilot-mcp = "devpilot_mcp.server:main"
+devpilot-ui = "devpilot_ui.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["devpilot_mcp*"]
+include = ["devpilot_mcp*", "devpilot_ui*"]
+
+[tool.setuptools.package-data]
+# The built web UI (ui/ -> `npm run build`); CI builds it before packaging.
+devpilot_ui = ["static/*", "static/**/*"]
