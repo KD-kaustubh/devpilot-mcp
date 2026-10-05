@@ -1,59 +1,70 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { ArrowUp, Bot, CircleX, KeyRound, PanelRightOpen, Sparkles, SquarePen, Zap } from "lucide-react";
+import { Activity, ArrowUp, Bot, CircleX, Command, GitCompareArrows, KeyRound, Maximize2, Sparkles, SquarePen, Zap } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { SUGGESTIONS, TOOL_LABEL, formatDuration, resultSummary } from "../lib";
+import { SUGGESTIONS, TOOL_LABEL } from "../lib";
 import type { Studio } from "../useStudio";
 import type { ChatMessage, ToolCall } from "../types";
 import { StatusIcon } from "./Activity";
 import { Markdown } from "./Markdown";
+import { ResultView } from "./results/ResultView";
+import { Steps } from "./Steps";
 
-export function ChatPanel({ studio, onOpenCall, onOpenFile, onToggleActivity }: {
+export function ChatPanel({ studio, onOpenCall, onOpenFile, onOpenActivity, onOpenChanges, onOpenPalette }: {
   studio: Studio;
   onOpenCall: (id: string) => void;
   onOpenFile: (path: string) => void;
-  onToggleActivity?: () => void;
+  onOpenActivity: () => void;
+  onOpenChanges: () => void;
+  onOpenPalette: () => void;
 }) {
-  const { messages, calls, busy, status, connection } = studio;
+  const { messages, calls, order, busy, status, connection, changes } = studio;
   const scroller = useRef<HTMLDivElement>(null);
   const aiOff = status !== null && !status.ai.configured;
+  const live = order.filter((id) => calls[id]?.status === "running" || calls[id]?.status === "awaiting").length;
+  const applied = changes.filter((c) => !c.undone).length;
 
   useEffect(() => {
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" });
-  }, [messages]);
+  }, [messages, calls]);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <header className="flex items-center gap-3 border-b border-[var(--border)] px-6 py-3.5">
+      <header className="flex items-center gap-2 border-b border-[var(--border)] px-6 py-3">
         <Sparkles size={16} className="text-indigo-400" />
         <h1 className="font-semibold">Chat</h1>
-        {status && <span className="truncate text-[12.5px] text-[var(--text-faint)]">about {status.workspace.name}</span>}
+        {status && <span className="hidden truncate text-[12.5px] text-[var(--text-faint)] sm:inline">about {status.workspace.name}</span>}
         <div className="ml-auto flex items-center gap-1">
           {connection !== "open" && (
-            <span className="mr-2 inline-flex items-center gap-1.5 text-[12px] text-amber-400">
+            <span className="mr-2 inline-flex items-center gap-1.5 text-[12px] text-amber-500">
               <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" /> reconnecting
             </span>
           )}
-          <button
-            onClick={studio.reset}
-            disabled={busy || messages.length === 0}
-            className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12.5px] text-[var(--text-muted)] transition hover:bg-[var(--panel-muted)] hover:text-[var(--text)] disabled:opacity-40"
-          >
-            <SquarePen size={14} /> New chat
-          </button>
-          {onToggleActivity && (
-            <button onClick={onToggleActivity} className="rounded-lg p-1.5 text-[var(--text-muted)] hover:bg-[var(--panel-muted)] xl:hidden" title="Activity">
-              <PanelRightOpen size={16} />
-            </button>
-          )}
+          <HeaderButton onClick={onOpenPalette} title="Run any tool (Ctrl+K)">
+            <Command size={14} /> Tools <kbd className="hidden rounded border border-[var(--border)] px-1 text-[10px] text-[var(--text-faint)] md:inline">Ctrl K</kbd>
+          </HeaderButton>
+          <HeaderButton onClick={onOpenActivity} title="Every tool call in this session">
+            <span className="relative">
+              <Activity size={14} />
+              {live > 0 && <span className="absolute -right-1 -top-1 h-2 w-2 animate-ping rounded-full bg-cyan-400" />}
+            </span>
+            Activity
+            {order.length > 0 && <Badge tone={live ? "live" : undefined}>{live || order.length}</Badge>}
+          </HeaderButton>
+          <HeaderButton onClick={onOpenChanges} title="Changes applied in this session">
+            <GitCompareArrows size={14} /> Changes {applied > 0 && <Badge tone="warn">{applied}</Badge>}
+          </HeaderButton>
+          <HeaderButton onClick={studio.reset} disabled={busy || messages.length === 0} title="Start a new conversation">
+            <SquarePen size={14} /> New
+          </HeaderButton>
         </div>
       </header>
 
       <div ref={scroller} className="min-h-0 flex-1 overflow-y-auto scroll-slim">
         <div className="mx-auto w-full max-w-3xl px-6 py-6">
           {messages.length === 0 ? (
-            <EmptyState name={status?.workspace.name} aiOff={aiOff} onPick={studio.ask} disabled={busy || connection !== "open" || aiOff} />
+            <EmptyState name={status?.workspace.name} aiOff={aiOff} onPick={studio.ask} disabled={busy || connection !== "open" || aiOff} onOpenPalette={onOpenPalette} />
           ) : (
-            <div className="space-y-5">
+            <div className="space-y-6">
               <AnimatePresence initial={false}>
                 {messages.map((m) => (
                   <MessageView key={m.id} message={m} calls={calls} onOpenCall={onOpenCall} onOpenFile={onOpenFile} />
@@ -67,14 +78,34 @@ export function ChatPanel({ studio, onOpenCall, onOpenFile, onToggleActivity }: 
       <Composer
         busy={busy}
         disabled={connection !== "open" || aiOff}
-        placeholder={aiOff ? "AI chat is off: set AIPIPE_TOKEN and restart devpilot-ui. Quick actions still work." : `Ask anything about ${status?.workspace.name ?? "this repository"}…`}
+        draft={studio.draft}
+        placeholder={aiOff ? "AI chat is off: set AIPIPE_TOKEN and restart devpilot-ui. Quick actions and Tools still work." : `Ask anything about ${status?.workspace.name ?? "this repository"}…`}
         onSend={studio.ask}
       />
     </div>
   );
 }
 
-function EmptyState({ name, aiOff, onPick, disabled }: { name?: string; aiOff: boolean; onPick: (t: string) => void; disabled: boolean }) {
+function HeaderButton({ children, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement>) {
+  return (
+    <button
+      {...props}
+      className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12.5px] text-[var(--text-muted)] transition hover:bg-[var(--panel-muted)] hover:text-[var(--text)] disabled:opacity-40"
+    >
+      {children}
+    </button>
+  );
+}
+
+function Badge({ children, tone }: { children: React.ReactNode; tone?: "live" | "warn" }) {
+  const color = tone === "live" ? "bg-cyan-500/20 text-cyan-600 dark:text-cyan-300" : tone === "warn" ? "bg-amber-500/20 text-amber-600 dark:text-amber-300"
+    : "bg-[var(--panel-muted)] text-[var(--text-faint)]";
+  return <span className={`rounded-full px-1.5 text-[10.5px] font-semibold tabular-nums ${color}`}>{children}</span>;
+}
+
+function EmptyState({ name, aiOff, onPick, disabled, onOpenPalette }: {
+  name?: string; aiOff: boolean; onPick: (t: string) => void; disabled: boolean; onOpenPalette: () => void;
+}) {
   return (
     <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="pt-[8vh] text-center">
       <motion.div
@@ -86,14 +117,15 @@ function EmptyState({ name, aiOff, onPick, disabled }: { name?: string; aiOff: b
         Ask about <span className="text-gradient">{name ?? "your repository"}</span>
       </h2>
       <p className="mx-auto mt-3 max-w-md text-[14px] text-[var(--text-muted)]">
-        DevPilot reads, searches and inspects the code through its MCP tools. Watch every call on the right.
+        DevPilot reads, searches and inspects the code through its MCP tools. Each answer shows the steps it took.
       </p>
       {aiOff ? (
         <div className="glass mx-auto mt-8 max-w-md rounded-2xl p-4 text-left text-[13px]">
           <div className="mb-1 flex items-center gap-2 font-semibold"><KeyRound size={15} className="text-amber-400" /> Turn on AI chat</div>
           <div className="text-[var(--text-muted)]">
             Get a token at <span className="font-mono">aipipe.org/login</span>, put <span className="font-mono">AIPIPE_TOKEN=…</span> in your
-            <span className="font-mono"> .env</span>, then restart <span className="font-mono">devpilot-ui</span>. Until then, use the quick actions on the left.
+            <span className="font-mono"> .env</span>, then restart <span className="font-mono">devpilot-ui</span>. Until then, use the quick actions,
+            the file explorer, or <button onClick={onOpenPalette} className="text-indigo-500 underline">run any tool</button>.
           </div>
         </div>
       ) : (
@@ -114,31 +146,19 @@ function EmptyState({ name, aiOff, onPick, disabled }: { name?: string; aiOff: b
           ))}
         </div>
       )}
+      <div className="mt-6 text-[12px] text-[var(--text-faint)]">
+        Tip: press <kbd className="rounded border border-[var(--border)] px-1">Ctrl</kbd> + <kbd className="rounded border border-[var(--border)] px-1">K</kbd> to run any of the 18 tools directly.
+      </div>
     </motion.div>
   );
 }
 
-function CallPill({ call, onOpen }: { call: ToolCall; onOpen: (id: string) => void }) {
-  return (
-    <motion.button
-      initial={{ opacity: 0, scale: 0.85 }}
-      animate={{ opacity: 1, scale: 1 }}
-      onClick={() => onOpen(call.id)}
-      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-[11px] transition hover:border-indigo-400/50 ${
-        call.status === "blocked" ? "border-rose-500/40 text-rose-600 dark:text-rose-300" : "border-[var(--border)] text-[var(--text-muted)]"}`}
-    >
-      <StatusIcon status={call.status} size={12} />
-      {call.name}
-      {call.durationMs !== undefined && <span className="text-[var(--text-faint)]">{formatDuration(call.durationMs)}</span>}
-    </motion.button>
-  );
-}
+const enter = { initial: { opacity: 0, y: 14 }, animate: { opacity: 1, y: 0 }, transition: { type: "spring" as const, stiffness: 260, damping: 26 } };
 
 function MessageView({ message, calls, onOpenCall, onOpenFile }: {
   message: ChatMessage; calls: Record<string, ToolCall>; onOpenCall: (id: string) => void; onOpenFile: (p: string) => void;
 }) {
   const own = message.callIds.map((id) => calls[id]).filter(Boolean);
-  const enter = { initial: { opacity: 0, y: 14 }, animate: { opacity: 1, y: 0 }, transition: { type: "spring" as const, stiffness: 260, damping: 26 } };
 
   if (message.role === "user") {
     return (
@@ -161,45 +181,42 @@ function MessageView({ message, calls, onOpenCall, onOpenFile }: {
   if (message.role === "action") {
     const call = own[0];
     return (
-      <motion.div {...enter} className="glass rounded-2xl p-4">
-        <div className="flex items-center gap-2 text-[13px]">
+      <motion.div {...enter} className="glass overflow-hidden rounded-2xl">
+        <div className="flex items-center gap-2 border-b border-[var(--border)] px-4 py-2.5 text-[13px]">
           <Zap size={15} className="text-cyan-400" />
           <span className="font-semibold">{message.text}</span>
-          <span className="text-[var(--text-faint)]">quick action</span>
-          {call && <span className="ml-auto"><StatusIcon status={call.status} size={16} /></span>}
+          {call && <span className="font-mono text-[11px] text-[var(--text-faint)]">{call.name}</span>}
+          <span className="ml-auto flex items-center gap-2">
+            {call && call.status !== "running" && call.status !== "awaiting" && (
+              <button onClick={() => onOpenCall(call.id)} title="Open full result" className="rounded-md p-1 text-[var(--text-faint)] hover:bg-[var(--panel-muted)] hover:text-[var(--text)]">
+                <Maximize2 size={13} />
+              </button>
+            )}
+            {call && <StatusIcon status={call.status} size={16} />}
+          </span>
         </div>
-        {call && call.status !== "running" && call.status !== "awaiting" && (
-          <div className="mt-2 flex items-center gap-3">
-            <div className={`min-w-0 flex-1 truncate text-[13px] ${call.status === "ok" ? "text-[var(--text-muted)]" : "text-rose-600 dark:text-rose-300"}`}>
-              {resultSummary(call)}
-            </div>
-            <button onClick={() => onOpenCall(call.id)} className="shrink-0 rounded-lg border border-[var(--border)] px-2.5 py-1 text-[12px] hover:border-indigo-400/50">
-              View result
-            </button>
-          </div>
-        )}
-        {call?.status === "awaiting" && <div className="mt-2 text-[12.5px] text-amber-600 dark:text-amber-300">Waiting for your approval…</div>}
+        <div className="px-4 py-3">
+          {!call ? <div className="shimmer h-1 rounded-full" />
+            : call.status === "awaiting" ? <div className="text-[12.5px] text-amber-600 dark:text-amber-300">Waiting for your approval…</div>
+            : <ResultView call={call} compact />}
+        </div>
       </motion.div>
     );
   }
 
   return (
     <motion.div {...enter} className="flex gap-3">
-      <div className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-gradient-to-br from-indigo-500/30 to-cyan-500/25 text-indigo-300">
+      <div className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-gradient-to-br from-indigo-500/30 to-cyan-500/25 text-indigo-400">
         <Bot size={16} />
       </div>
       <div className="min-w-0 flex-1">
-        {own.length > 0 && (
-          <div className="mb-2 flex flex-wrap gap-1.5">
-            {own.map((call) => <CallPill key={call.id} call={call} onOpen={onOpenCall} />)}
-          </div>
-        )}
+        <Steps calls={own} working={Boolean(message.streaming)} onOpen={onOpenCall} />
         {message.text ? (
           <div className={message.streaming ? "caret" : ""}>
             <Markdown text={message.text} onOpenFile={onOpenFile} />
           </div>
         ) : message.streaming ? (
-          <ThinkingDots label={own.length ? `Using ${TOOL_LABEL[own[own.length - 1].name] ?? "tools"}…` : "Thinking…"} />
+          <ThinkingDots label={own.length ? `${TOOL_LABEL[own[own.length - 1].name] ?? "Using tools"}…` : "Thinking…"} />
         ) : null}
       </div>
     </motion.div>
@@ -224,9 +241,20 @@ function ThinkingDots({ label }: { label: string }) {
   );
 }
 
-function Composer({ busy, disabled, placeholder, onSend }: { busy: boolean; disabled: boolean; placeholder: string; onSend: (t: string) => void }) {
+function Composer({ busy, disabled, placeholder, draft, onSend }: {
+  busy: boolean; disabled: boolean; placeholder: string; draft: { text: string; nonce: number } | null; onSend: (t: string) => void;
+}) {
   const [text, setText] = useState("");
   const area = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (!draft) return;
+    setText(draft.text);
+    requestAnimationFrame(() => {
+      area.current?.focus();
+      area.current?.setSelectionRange(draft.text.length, draft.text.length);
+    });
+  }, [draft]);
 
   useEffect(() => {
     const el = area.current;

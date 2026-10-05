@@ -3,21 +3,7 @@ import { FilePenLine, ShieldCheck, Terminal } from "lucide-react";
 import { useEffect } from "react";
 import { ACCESS, TOOL_LABEL } from "../lib";
 import type { ApprovalRequest } from "../types";
-
-export function DiffView({ patch }: { patch: string }) {
-  return (
-    <pre className="max-h-[42vh] overflow-auto rounded-xl border border-[var(--border)] bg-[#0b1020] py-2 font-mono text-[12px] leading-[1.55] scroll-slim">
-      {patch.split("\n").map((line, i) => {
-        const tone = line.startsWith("+++") || line.startsWith("---") ? "text-slate-300 font-semibold"
-          : line.startsWith("+") ? "bg-emerald-500/12 text-emerald-300"
-          : line.startsWith("-") ? "bg-rose-500/12 text-rose-300"
-          : line.startsWith("@@") ? "text-cyan-300"
-          : "text-slate-400";
-        return <div key={i} className={`whitespace-pre px-4 ${tone}`}>{line || " "}</div>;
-      })}
-    </pre>
-  );
-}
+import { DiffView } from "./CodeViews";
 
 export function ApprovalDialog({ request, workspace, onAnswer }: {
   request: ApprovalRequest | null; workspace?: string; onAnswer: (callId: string, approved: boolean) => void;

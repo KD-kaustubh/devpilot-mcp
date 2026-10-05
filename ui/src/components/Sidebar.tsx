@@ -4,6 +4,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { ACCESS, QUICK_ACTIONS } from "../lib";
+import { FileExplorer } from "./FileExplorer";
 import type { Studio } from "../useStudio";
 import type { Access } from "../types";
 
@@ -36,8 +37,11 @@ export function Logo() {
   );
 }
 
-export function Sidebar({ studio, dark, toggleTheme }: { studio: Studio; dark: boolean; toggleTheme: () => void }) {
+export function Sidebar({ studio, dark, toggleTheme, onOpenTool, onOpenFile }: {
+  studio: Studio; dark: boolean; toggleTheme: () => void; onOpenTool: (name: string) => void; onOpenFile: (path: string) => void;
+}) {
   const { status, busy, calls, order } = studio;
+  const [tab, setTab] = useState<"overview" | "files">("overview");
   const running = new Set(order.map((id) => calls[id]).filter((c) => c?.status === "running").map((c) => c.name));
 
   return (
@@ -55,6 +59,20 @@ export function Sidebar({ studio, dark, toggleTheme }: { studio: Studio; dark: b
 
       <WorkspaceCard studio={studio} />
 
+      <div className="relative grid grid-cols-2 rounded-xl border border-[var(--border)] p-0.5 text-[12.5px]">
+        {(["overview", "files"] as const).map((t) => (
+          <button key={t} onClick={() => setTab(t)} className="relative z-10 rounded-[10px] py-1.5 font-medium transition">
+            {tab === t && <motion.span layoutId="sidebar-tab" className="absolute inset-0 -z-10 rounded-[10px] bg-indigo-500/15" transition={{ type: "spring", stiffness: 400, damping: 32 }} />}
+            <span className={tab === t ? "text-[var(--text)]" : "text-[var(--text-muted)]"}>{t === "overview" ? "Overview" : "Files"}</span>
+          </button>
+        ))}
+      </div>
+
+      {tab === "files" ? (
+        <div className="min-h-0 flex-1">
+          <FileExplorer query={studio.query} onOpenFile={onOpenFile} connected={studio.connection === "open"} />
+        </div>
+      ) : (<>
       <section>
         <SectionTitle>Quick actions</SectionTitle>
         <div className="grid grid-cols-2 gap-2">
@@ -90,9 +108,11 @@ export function Sidebar({ studio, dark, toggleTheme }: { studio: Studio; dark: b
             access={access}
             tools={(status?.tools ?? []).filter((t) => t.access === access)}
             running={running}
+            onOpenTool={onOpenTool}
           />
         ))}
       </section>
+      </>)}
 
       <div className="text-[11px] text-[var(--text-faint)]">
         v{status?.version ?? "…"} · runs locally · <span className="font-mono">127.0.0.1</span>
@@ -153,7 +173,9 @@ function WorkspaceCard({ studio }: { studio: Studio }) {
   );
 }
 
-function ToolGroup({ access, tools, running }: { access: Access; tools: { name: string; summary: string }[]; running: Set<string> }) {
+function ToolGroup({ access, tools, running, onOpenTool }: {
+  access: Access; tools: { name: string; summary: string }[]; running: Set<string>; onOpenTool: (name: string) => void;
+}) {
   const [open, setOpen] = useState(access !== "read");
   const meta = ACCESS[access];
   return (
@@ -178,18 +200,20 @@ function ToolGroup({ access, tools, running }: { access: Access; tools: { name: 
             className="overflow-hidden"
           >
             {tools.map((tool) => (
-              <li
-                key={tool.name}
-                title={tool.summary}
-                className={`ml-4 flex items-center gap-2 rounded-md px-2 py-1 font-mono text-[11.5px] transition ${
-                  running.has(tool.name) ? "bg-indigo-500/15 text-[var(--text)]" : "text-[var(--text-muted)]"}`}
-              >
-                {running.has(tool.name) ? (
-                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-400" />
-                ) : (
-                  <span className="h-1.5 w-1.5 rounded-full bg-[var(--border)]" />
-                )}
-                <span className="truncate">{tool.name}</span>
+              <li key={tool.name}>
+                <button
+                  onClick={() => onOpenTool(tool.name)}
+                  title={`${tool.summary}\nClick to run it`}
+                  className={`ml-4 flex w-[calc(100%-1rem)] items-center gap-2 rounded-md px-2 py-1 text-left font-mono text-[11.5px] transition hover:bg-indigo-500/10 hover:text-[var(--text)] ${
+                    running.has(tool.name) ? "bg-indigo-500/15 text-[var(--text)]" : "text-[var(--text-muted)]"}`}
+                >
+                  {running.has(tool.name) ? (
+                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-400" />
+                  ) : (
+                    <span className="h-1.5 w-1.5 rounded-full bg-[var(--border)]" />
+                  )}
+                  <span className="truncate">{tool.name}</span>
+                </button>
               </li>
             ))}
           </motion.ul>

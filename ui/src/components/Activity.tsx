@@ -90,8 +90,6 @@ export function ActivityPanel({ calls, order, onOpen, onClear }: {
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center gap-2 px-4 pb-3 pt-4">
-        <ActivityIcon size={16} className="text-cyan-400" />
-        <h2 className="font-semibold">Activity</h2>
         <span className="text-[12px] text-[var(--text-faint)]">{items.length ? `${items.length} call${items.length === 1 ? "" : "s"}` : ""}</span>
         {items.length > 0 && (
           <button onClick={onClear} title="Clear activity" className="ml-auto rounded-md p-1.5 text-[var(--text-faint)] hover:bg-[var(--panel-muted)] hover:text-[var(--text)]">

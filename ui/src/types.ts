@@ -1,10 +1,34 @@
 export type Access = "read" | "write" | "execute";
 export type CallStatus = "running" | "awaiting" | "ok" | "error" | "blocked" | "denied";
 
+export interface JsonSchema {
+  type?: string | string[];
+  title?: string;
+  description?: string;
+  default?: unknown;
+  enum?: unknown[];
+  const?: unknown;
+  minimum?: number;
+  maximum?: number;
+  minLength?: number;
+  maxLength?: number;
+  anyOf?: JsonSchema[];
+  properties?: Record<string, JsonSchema>;
+  required?: string[];
+}
+
 export interface ToolInfo {
   name: string;
   summary: string;
+  description: string;
   access: Access;
+  input_schema: JsonSchema;
+}
+
+export interface QueryResult {
+  status: "ok" | "error" | "blocked" | "refused";
+  text: string;
+  structured: Record<string, any> | null;
 }
 
 export interface GitInfo {
@@ -60,4 +84,5 @@ export type ServerEvent =
   | { type: "answer_done" }
   | { type: "action_done" }
   | { type: "reset_done" }
-  | { type: "error"; message: string; refused?: boolean };
+  | { type: "error"; message: string; refused?: boolean }
+  | ({ type: "query_result"; request_id: string } & QueryResult);

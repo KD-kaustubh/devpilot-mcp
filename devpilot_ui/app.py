@@ -27,7 +27,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from devpilot_ui.agent import Agent
 from devpilot_ui.config import UISettings
-from devpilot_ui.mcp_session import McpSession, ToolRunner, stdio_server
+from devpilot_ui.mcp_session import MAX_UI_RESULT_CHARS, McpSession, ToolRunner, is_security_block, stdio_server
 
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_MESSAGE_BYTES = 256_000  # a question or tool call from the browser; patches can be up to 256 KB
@@ -56,6 +56,7 @@ class _Connection:
         self.agent = agent
         self.task: asyncio.Task | None = None
         self.pending: dict[str, asyncio.Future[bool]] = {}
+        self.queries: set[asyncio.Task] = set()
         self._send_lock = asyncio.Lock()
 
     async def emit(self, event: dict[str, Any]) -> None:
@@ -79,6 +80,12 @@ class _Connection:
             future = self.pending.get(str(message.get("call_id")))
             if future is not None and not future.done():
                 future.set_result(message.get("approved") is True)
+            return
+        if kind == "query":
+            # Silent read-only lookups (file tree, file viewer, current diff): no timeline events, never "busy".
+            task = asyncio.create_task(self._query(message))
+            self.queries.add(task)
+            task.add_done_callback(self.queries.discard)
             return
         if kind == "reset":
             if self.agent is not None and not self.busy():
@@ -104,6 +111,24 @@ class _Connection:
             name, arguments = str(message.get("name") or ""), message.get("arguments") or {}
             self.task = asyncio.create_task(self._run_tool(name, arguments))
 
+    async def _query(self, message: dict[str, Any]) -> None:
+        request_id = str(message.get("request_id") or "")[:64]
+        name, arguments = str(message.get("name") or ""), message.get("arguments") or {}
+        tool = self.runner.session.tools.get(name)
+        if tool is None or tool.access != "read" or not isinstance(arguments, dict):
+            # Anything that can write files or run code must go through run_tool and its approval gate.
+            await self.emit({"type": "query_result", "request_id": request_id, "status": "refused",
+                             "text": "Only read-only tools can be queried.", "structured": None})  # fmt: skip
+            return
+        try:
+            is_error, text, structured = await self.runner.session.call(name, arguments)
+        except Exception as exc:  # the server process died or the transport failed
+            is_error, text, structured = True, f"The DevPilot server could not run the tool: {type(exc).__name__}.", None
+        status = ("blocked" if is_security_block(text) else "error") if is_error else "ok"
+        await self.emit({"type": "query_result", "request_id": request_id, "status": status,
+                         "text": text[:MAX_UI_RESULT_CHARS],
+                         "structured": structured if len(text) <= MAX_UI_RESULT_CHARS else None})  # fmt: skip
+
     async def _run_tool(self, name: str, arguments: Any) -> None:
         await self.runner.execute(name, arguments, source="user", emit=self.emit, approve=self.approve)
         await self.emit({"type": "action_done"})
@@ -114,6 +139,8 @@ class _Connection:
                 future.set_result(False)  # a closed tab never approves anything
         if self.task is not None and not self.task.done():
             self.task.cancel()
+        for task in list(self.queries):
+            task.cancel()
 
 
 def create_app(
@@ -146,7 +173,11 @@ def create_app(
             else {"available": True, "branch": structured.get("branch"), "clean": structured.get("clean"),
                   "counts": structured.get("counts"), "head": (structured.get("head_commit") or "")[:7]}
         )  # fmt: skip
-        tools = [{"name": t.name, "summary": t.summary, "access": t.access} for t in runner.session.tools.values()]
+        tools = [
+            {"name": t.name, "summary": t.summary, "description": t.description, "access": t.access,
+             "input_schema": t.input_schema}
+            for t in runner.session.tools.values()
+        ]  # fmt: skip
         return JSONResponse({
             "version": _version(),
             "workspace": {"name": settings.workspace_root.name, "path": str(settings.workspace_root)},

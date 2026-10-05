@@ -101,10 +101,12 @@ pip install "devpilot-mcp[ui]"
 devpilot-ui
 ```
 
-It opens `http://127.0.0.1:8765` in your browser, with three panels:
-- **Sidebar:** the workspace with its Git status, quick actions and the 18 tools.
-- **Chat:** streaming Markdown answers, with clickable file paths.
-- **Activity:** an animated timeline of every tool call, including calls blocked by DevPilot's security.
+It opens `http://127.0.0.1:8765` in your browser:
+- **Chat:** streaming answers. An animated **Steps** panel in each answer shows every tool call, including calls blocked by DevPilot's security.
+- **Result cards:** visual cards instead of JSON (language bars, commit timelines, diffs, search matches, test results).
+- **Sidebar:** the workspace and its Git status, quick actions, the 18 tools, and a **file explorer** with a file viewer.
+- **Ctrl+K:** run any tool through a form.
+- **Changes:** every applied patch, with one-click **Undo**.
 
 Setup:
 - **AI chat:** needs an [AI Pipe](https://aipipe.org/login) token in `AIPIPE_TOKEN`. Quick actions work without it.

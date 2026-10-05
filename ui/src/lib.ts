@@ -96,42 +96,6 @@ export function argsPreview(call: Pick<ToolCall, "arguments">): string {
     .join(" · ");
 }
 
-/** A short, human summary of a finished call's result for chat cards. */
-export function resultSummary(call: ToolCall): string {
-  const s = call.structured as Record<string, any> | null | undefined;
-  if (call.status === "denied") return "You denied this action, so nothing ran.";
-  if (call.status !== "ok" || !s) return firstLine(call.text ?? "");
-  switch (call.name) {
-    case "analyze_repository": {
-      const langs = Object.entries((s.languages ?? {}) as Record<string, number>).slice(0, 3).map(([k, v]) => `${k} ${v}`);
-      return `${s.total_files} files · ${langs.join(", ")}`;
-    }
-    case "git_status":
-      return s.clean ? `On ${s.branch ?? "detached HEAD"} · working tree clean`
-        : `On ${s.branch ?? "detached HEAD"} · ${s.counts?.staged ?? 0} staged, ${s.counts?.unstaged ?? 0} unstaged, ${s.counts?.untracked ?? 0} untracked`;
-    case "git_log":
-      return `${s.commits?.length ?? 0} commits · latest: ${s.commits?.[0]?.subject ?? "—"}`;
-    case "get_test_commands":
-      return s.primary ? `${s.primary.framework} (${s.primary.confidence} confidence)` : "No test framework detected";
-    case "run_tests":
-      return `${s.status} · ${s.passed ?? "?"} passed, ${s.failed ?? "?"} failed, ${s.skipped ?? "?"} skipped`;
-    case "validate_repository":
-      return `${(s.checks ?? []).filter((c: any) => c.status === "passed").length}/${s.checks?.length ?? 0} checks passed`;
-    case "read_file":
-      return `${s.path} · ${s.line_count} lines`;
-    case "search_code":
-    case "search_files":
-      return `${s.matches?.length ?? 0} matches`;
-    default:
-      return firstLine(call.text ?? "");
-  }
-}
-
-function firstLine(text: string): string {
-  const line = text.trim().split("\n")[0] ?? "";
-  return line.length > 140 ? line.slice(0, 140) + "…" : line;
-}
-
 /** Re-render on an interval while `active` (live timers). */
 export function useNow(active: boolean, intervalMs = 100): number {
   const [now, setNow] = useState(Date.now());

@@ -208,6 +208,50 @@ class QuickActionTests(StudioTestCase):
         self.assertEqual(next(e for e in report if e["type"] == "tool_finished")["status"], "ok")
 
 
+class QueryTests(StudioTestCase):
+    """Silent queries power the file explorer and the changes panel: read-only tools only, no timeline events."""
+
+    def test_status_includes_tool_schemas_for_the_tool_runner(self) -> None:
+        with self.client(FakeLLM()) as client:
+            tools = {t["name"]: t for t in client.get("/api/status").json()["tools"]}
+        self.assertEqual(tools["search_code"]["input_schema"]["required"], ["query"])
+        self.assertIn("path", tools["search_code"]["input_schema"]["properties"])
+        self.assertTrue(tools["apply_patch"]["description"])
+
+    def test_read_only_query_returns_the_result_without_timeline_events(self) -> None:
+        with self.client(None, api_key=None) as client, client.websocket_connect("/ws", headers=ORIGIN) as ws:
+            ws.send_json({"type": "query", "request_id": "q1", "name": "list_directory", "arguments": {"path": "src"}})
+            result = ws.receive_json()
+            ws.send_json({"type": "query", "request_id": "q2", "name": "read_file", "arguments": {"path": "../secret.txt"}})
+            blocked = ws.receive_json()
+        self.assertEqual((result["type"], result["request_id"], result["status"]), ("query_result", "q1", "ok"))
+        self.assertEqual([e["name"] for e in result["structured"]["entries"]], ["app.py", "util.py"])
+        self.assertEqual((blocked["request_id"], blocked["status"]), ("q2", "blocked"))
+        self.assertNotIn("TOP SECRET", blocked["text"])
+
+    def test_queries_never_run_write_or_execute_tools(self) -> None:
+        patch = "--- /dev/null\n+++ b/sneaky.txt\n@@ -0,0 +1 @@\n+x\n"
+        attempts = [("apply_patch", {"patch": patch}), ("revert_patch", {"change_id": "chg_0123456789abcdef"}),
+                    ("run_tests", {}), ("validate_repository", {}), ("no_such_tool", {}), ("read_file", "not-a-dict")]
+        with self.client(None, api_key=None) as client, client.websocket_connect("/ws", headers=ORIGIN) as ws:
+            replies = []
+            for i, (name, args) in enumerate(attempts):
+                ws.send_json({"type": "query", "request_id": f"r{i}", "name": name, "arguments": args})
+                replies.append(ws.receive_json())
+        self.assertTrue(all(r["type"] == "query_result" and r["status"] == "refused" for r in replies), replies)
+        self.assertFalse((self.workspace.root / "sneaky.txt").exists())
+
+    def test_queries_work_while_an_action_is_waiting_for_approval(self) -> None:
+        with self.client(None, api_key=None) as client, client.websocket_connect("/ws", headers=ORIGIN) as ws:
+            ws.send_json({"type": "run_tool", "name": "run_tests", "arguments": {}})
+            self.events_until(ws, "approval_required")
+            ws.send_json({"type": "query", "request_id": "q", "name": "list_directory", "arguments": {}})
+            reply = ws.receive_json()
+            self.assertEqual((reply["type"], reply["status"]), ("query_result", "ok"))
+            ws.send_json({"type": "run_tool", "name": "git_status", "arguments": {}})
+            self.assertTrue(ws.receive_json().get("refused"))  # the approval-waiting action keeps the tab busy
+
+
 class StdioSessionTests(StudioTestCase):
     def test_real_server_process_over_stdio(self) -> None:
         import asyncio

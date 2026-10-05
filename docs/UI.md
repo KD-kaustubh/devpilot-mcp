@@ -40,11 +40,35 @@ AI Pipe gives each user a small weekly budget. Every question sends DevPilot's 1
 
 ## What you see
 
-- **Sidebar:** the workspace, its branch and clean/dirty state, whether AI is on, **quick actions** (Analyze, Git status, Commits, Detect tests, Validate, Run tests) and the 18 tools grouped by access.
-- **Chat:** suggested questions, streaming Markdown answers with highlighted code, pills for the tools used in each answer, and clickable file paths that open the file.
-- **Activity:** one card per tool call, animated from running (with a live timer) to done, failed, **blocked by DevPilot security** (for example a request for `.env`) or denied. Click a card to see its arguments and full result.
+- **Sidebar, Overview tab:**
+  - the workspace, its branch, clean or changed state, and whether AI is on;
+  - **quick actions:** Analyze, Git status, Commits, Detect tests, Validate, Run tests;
+  - the 18 tools grouped by access. Click a tool to run it.
+- **Sidebar, Files tab:** a folder tree of the repository.
+  - Click a file to open it in the **file viewer**, which has line numbers and highlighting.
+  - **Ask about this file** puts the file into the chat box.
+  - Secret files such as `.env` are listed with a lock and never opened.
+- **Chat:**
+  - suggested questions and streaming Markdown answers with highlighted code;
+  - clickable file paths that open the file viewer;
+  - a **Steps** panel inside each answer. It lists every tool the AI used, animated while running (with a live timer). Each step ends as done, failed, **blocked by DevPilot security** (for example a request for `.env`) or denied. It folds into one line ("Used 3 tools · 264 ms · 1 blocked") when the answer is finished; click a step for details.
+- **Result cards instead of JSON.** Every tool's result appears as a visual card in the chat:
+  - language bars and stat tiles;
+  - Git status lists, a commit timeline and colored diffs;
+  - search matches grouped by file, with the term highlighted;
+  - ranked investigation evidence, GitHub issues and pull requests;
+  - test results with a pass/fail bar, and a validation checklist.
+
+  The details view adds the full result and a **Raw JSON** tab.
+- **Tools (Ctrl+K):** run any of the 18 tools directly. Each tool gets a form built from its inputs, so no AI is needed.
+- **Activity (header):** the full history of tool calls, opened only when you want it. The badge pulses while calls are running.
+- **Changes (header):**
+  - every patch applied in this session, with its files, the patch itself and an **Undo** button;
+  - the current Git diff.
 - **Approval dialog:** for changes and test runs, with a colored diff preview for `apply_patch`.
 - Dark and light themes.
+
+The file explorer, file viewer and Changes panel read the repository with *silent* read-only tool calls. These don't add messages to the chat. The server refuses to run any tool that writes files or runs code this way, so those always go through the approval dialog.
 
 ## Safety
 
@@ -94,4 +118,4 @@ The backend tests are in `tests/test_ui.py`. They use a scripted fake model, so 
 - **One user, one machine.** It is not designed to be hosted on a server or shared over a network.
 - **Chat needs a model with tool calling**; `gpt-4.1-mini` and `gpt-4.1-nano` work through AI Pipe.
 - **One request at a time per tab.** A new question waits until the current answer or action finishes.
-- **Small screens.** The sidebar hides below laptop width, and the activity panel becomes a slide-over.
+- **Small screens.** The sidebar (with quick actions and the file explorer) hides below laptop width; chat, Ctrl+K, Activity and Changes still work.

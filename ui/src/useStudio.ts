@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from "react";
-import type { ApprovalRequest, ChatMessage, ServerEvent, Status, ToolCall } from "./types";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import type { ApprovalRequest, ChatMessage, QueryResult, ServerEvent, Status, ToolCall } from "./types";
 
 type Connection = "connecting" | "open" | "closed";
 
@@ -92,6 +92,7 @@ function applyEvent(state: State, event: ServerEvent): State {
       return { ...state, busy: false, activeAction: null,
         messages: state.messages.map((m) => (m.id === state.activeAction ? { ...m, streaming: false } : m)) };
     case "reset_done":
+    case "query_result":
       return state;
     case "error": {
       const error: ChatMessage = { id: uid(), role: "error", text: event.message, callIds: [] };
@@ -109,6 +110,8 @@ export function useStudio() {
   const [status, setStatus] = useState<Status | null>(null);
   const [connection, setConnection] = useState<Connection>("connecting");
   const socket = useRef<WebSocket | null>(null);
+  const queries = useRef(new Map<string, (result: QueryResult) => void>());
+  const [draft, setDraft] = useState<{ text: string; nonce: number } | null>(null);
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -136,11 +139,18 @@ export function useStudio() {
       };
       ws.onmessage = (message) => {
         const event = JSON.parse(message.data) as ServerEvent;
+        if (event.type === "query_result") {
+          queries.current.get(event.request_id)?.(event);
+          queries.current.delete(event.request_id);
+          return;
+        }
         dispatch({ kind: "event", event });
         if (event.type === "answer_done" || event.type === "action_done") refreshStatus();
       };
       ws.onclose = () => {
         socket.current = null;
+        for (const resolve of queries.current.values()) resolve({ status: "error", text: "Disconnected from DevPilot.", structured: null });
+        queries.current.clear();
         dispatch({ kind: "disconnected" });
         if (stopped) return;
         setConnection("closed");
@@ -183,7 +193,29 @@ export function useStudio() {
 
   const clearActivity = useCallback(() => dispatch({ kind: "clearActivity" }), []);
 
-  return { ...state, status, connection, ask, runTool, answerApproval, reset, clearActivity, refreshStatus };
+  /** A silent read-only lookup (no chat message, no timeline card). The server refuses anything else. */
+  const query = useCallback((name: string, args: Record<string, unknown>) => new Promise<QueryResult>((resolve) => {
+    const requestId = `q${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    queries.current.set(requestId, resolve);
+    if (!send({ type: "query", request_id: requestId, name, arguments: args })) {
+      queries.current.delete(requestId);
+      resolve({ status: "error", text: "Not connected to DevPilot.", structured: null });
+    }
+  }), [send]);
+
+  /** Put text into the composer (e.g. "Ask about this file"). */
+  const prefill = useCallback((text: string) => setDraft({ text, nonce: Date.now() }), []);
+
+  /** Every successful apply_patch this session, with whether a later revert_patch undid it. */
+  const changes = useMemo(() => {
+    const all = state.order.map((id) => state.calls[id]).filter(Boolean);
+    const reverted = new Set(all.filter((c) => c.name === "revert_patch" && c.status === "ok").map((c) => String(c.structured?.change_id)));
+    return all.filter((c) => c.name === "apply_patch" && c.status === "ok" && c.structured?.change_id)
+      .map((call) => ({ call, changeId: String(call.structured!.change_id), undone: reverted.has(String(call.structured!.change_id)) }))
+      .reverse();
+  }, [state.calls, state.order]);
+
+  return { ...state, status, connection, ask, runTool, answerApproval, reset, clearActivity, refreshStatus, query, draft, prefill, changes };
 }
 
 export type Studio = ReturnType<typeof useStudio>;
