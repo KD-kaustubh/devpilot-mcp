@@ -77,13 +77,13 @@ export function ApprovalDialog({ request, workspace, onAnswer }: {
                 <ShieldCheck size={14} /> Nothing runs until you approve
               </span>
               <button
+                autoFocus
                 onClick={() => onAnswer(request.callId, false)}
                 className="ml-auto rounded-xl border border-[var(--border)] px-4 py-2 text-[13.5px] font-medium transition hover:bg-[var(--panel-muted)]"
               >
                 Deny <span className="ml-1 text-[11px] text-[var(--text-faint)]">Esc</span>
               </button>
               <motion.button
-                autoFocus
                 whileTap={{ scale: 0.96 }}
                 onClick={() => onAnswer(request.callId, true)}
                 className={`rounded-xl px-4 py-2 text-[13.5px] font-semibold text-white shadow-lg transition ${

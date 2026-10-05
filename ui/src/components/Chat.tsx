@@ -119,6 +119,9 @@ function EmptyState({ name, aiOff, onPick, disabled, onOpenPalette }: {
       <p className="mx-auto mt-3 max-w-md text-[14px] text-[var(--text-muted)]">
         DevPilot reads, searches and inspects the code through its MCP tools. Each answer shows the steps it took.
       </p>
+      <p className="mx-auto mt-2 max-w-md text-[13px] text-[var(--text-faint)]">
+        It reads your code freely, and never changes a file or runs tests without your approval.
+      </p>
       {aiOff ? (
         <div className="glass mx-auto mt-8 max-w-md rounded-2xl p-4 text-left text-[13px]">
           <div className="mb-1 flex items-center gap-2 font-semibold"><KeyRound size={15} className="text-amber-400" /> Turn on AI chat</div>
