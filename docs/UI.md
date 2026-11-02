@@ -28,6 +28,8 @@ Chat uses an OpenAI-compatible model through [AI Pipe](https://aipipe.org):
 2. Set `AIPIPE_TOKEN`, either in `.env` or in the terminal before `devpilot-ui`.
 3. Restart `devpilot-ui`. The sidebar shows **AI · gpt-4.1-mini via aipipe.org**.
 
+AI Pipe tokens expire. If chat shows "invalid or has expired", sign in again, copy the new token into `AIPIPE_TOKEN`, and restart `devpilot-ui`.
+
 | Setting | Default | Meaning |
 |---------|---------|---------|
 | `AIPIPE_TOKEN` | *(unset)* | Your AI Pipe token. Without it, chat is off and quick actions still work. |

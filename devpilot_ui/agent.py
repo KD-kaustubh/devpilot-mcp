@@ -52,7 +52,7 @@ def describe_ai_error(exc: Exception) -> str:
     """A short, safe message for an AI service failure (never includes the key or request body)."""
     status = getattr(exc, "status_code", None)
     if status == 401:
-        return "The AI service rejected the API key. Check AIPIPE_TOKEN (get one at https://aipipe.org/login)."
+        return "The AI service rejected the API key: it is invalid or has expired. Get a new AIPIPE_TOKEN at https://aipipe.org/login, update .env and restart devpilot-ui."
     if status in (402, 429):
         return "The AI service refused the request: rate limit or budget reached. Try again later or use a cheaper model."
     if status == 404:
